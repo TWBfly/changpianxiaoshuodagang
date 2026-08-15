@@ -335,6 +335,14 @@ class CanonicalStoreTests(unittest.TestCase):
         self.assertEqual(result["payload_clusters"], 2)
         self.assertEqual(result["core_scenes"], 2)
 
+    def test_unknown_chapter_mode_cannot_bypass_long_capacity(self):
+        payload = build_chapter_payload()
+        payload["target_prose_contract"]["chapter_mode"] = "UNKNOWN"
+        payload["payload_clusters"] = payload["payload_clusters"][:1]
+        payload["scene_payloads"] = payload["scene_payloads"][:1]
+        report = audit_packet({"entities": [chapter_entity(payload)], "edges": []})
+        self.assertIn("CAPACITY_GATE_FAILED", {item["code"] for item in report.errors})
+
     def test_full_book_mode_rejects_missing_chapter_plan(self):
         packet = {
             "entities": [{
@@ -346,6 +354,24 @@ class CanonicalStoreTests(unittest.TestCase):
         }
         codes = {item["code"] for item in audit_packet(packet).errors}
         self.assertIn("CHAPTER_PLAN_MISSING", codes)
+
+    def test_full_book_mode_requires_expected_chapter_count(self):
+        packet = {
+            "entities": [chapter_entity()],
+            "edges": [],
+            "precision": {"full_book_detailed_required": True},
+        }
+        codes = {item["code"] for item in audit_packet(packet).errors}
+        self.assertIn("EXPECTED_CHAPTERS_REQUIRED", codes)
+
+    def test_full_book_mode_handles_invalid_chapter_payload_without_crashing(self):
+        packet = {
+            "entities": [{"id": "CHAPTER.1", "kind": "CHAPTER_PLAN", "name": "坏章", "payload": "not-an-object"}],
+            "edges": [],
+            "precision": {"full_book_detailed_required": True, "expected_chapters": 1},
+        }
+        report = audit_packet(packet)
+        self.assertIn("INVALID_PAYLOAD", {item["code"] for item in report.errors})
 
     def test_full_book_mode_rejects_index_only_chapter(self):
         payload = build_chapter_payload()
@@ -525,6 +551,35 @@ class Neo4jProjectionTests(unittest.TestCase):
         self.assertEqual(props["role"], "initiator")
         self.assertNotIn("unsafe-key", props)
         self.assertIn("payload", props)
+
+    def test_projector_rejects_edges_with_missing_endpoints_before_projection(self):
+        class MissingEndpointProjector(GraphProjector):
+            def __init__(self):
+                super().__init__(shell="fake")
+                self.projection_called = False
+
+            def ensure_schema(self):
+                return None
+
+            def _run(self, cypher, params=None):
+                if cypher == self.EDGE_PREFLIGHT:
+                    return "edge_id\tsource_id\ttarget_id\nEDGE.1\tCHAR.missing\tEVENT.missing\n"
+                self.projection_called = True
+                return ""
+
+        projector = MissingEndpointProjector()
+        with self.assertRaises(ValidationError) as context:
+            projector.sync("PROJECT.demo", [{
+                "change_id": 1, "version": 1, "object_type": "EDGE", "object_id": "EDGE.1",
+                "action": "UPSERT", "before_json": None,
+                "after_json": json.dumps({
+                    "edge_id": "EDGE.1", "edge_type": "CAUSES", "source_id": "CHAR.missing",
+                    "target_id": "EVENT.missing", "namespace": "PLAN", "status": "ACTIVE",
+                    "payload_json": "{}",
+                }),
+            }])
+        self.assertEqual(context.exception.code, "NEO4J_ENDPOINT_MISSING")
+        self.assertFalse(projector.projection_called)
 
     def test_projector_requires_local_shell_configuration(self):
         projector = GraphProjector(shell="/missing/cypher-shell")
@@ -735,6 +790,20 @@ class CliTests(unittest.TestCase):
             output = StringIO()
             with redirect_stdout(output):
                 code = main(["audit", "--packet", str(packet_path)])
+            self.assertEqual(code, 0)
+            self.assertTrue(json.loads(output.getvalue())["ok"])
+
+    def test_cli_audit_packet_can_also_report_graph_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "outline.db")
+            packet_path = Path(tmp) / "packet.json"
+            packet_path.write_text(json.dumps({"entities": [], "edges": []}), encoding="utf-8")
+            CanonicalStore(Path(db)).init_project("PROJECT.demo", "Demo")
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main([
+                    "audit", "--packet", str(packet_path), "--db", db, "--project-id", "PROJECT.demo",
+                ])
             self.assertEqual(code, 0)
             self.assertTrue(json.loads(output.getvalue())["ok"])
 

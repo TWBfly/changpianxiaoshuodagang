@@ -99,6 +99,7 @@ PROVENANCE_KINDS = {
 }
 CAUSAL_EDGE_TYPES = {"CAUSES", "PRECEDES", "RESULTS_IN"}
 PACKET_MODES = {"SNAPSHOT", "PATCH"}
+CHAPTER_MODES = {"STANDARD_LONG", "MAJOR_LONG", "QUIET_LONG"}
 ALLOWED_NAMESPACES = {"CONTRACT", "CANON", "PLAN"}
 ALLOWED_STATUSES = {
     "ACTIVE", "PROPOSED", "SUPERSEDED", "INVALIDATED", "QUARANTINED",
@@ -158,6 +159,10 @@ def audit_chapter_capacity(entity: dict) -> dict:
 
     contract = payload.get("target_prose_contract")
     target_range = None
+    mode = str((contract or {}).get("chapter_mode", "STANDARD_LONG")).upper() if isinstance(contract, dict) else "STANDARD_LONG"
+    if mode not in CHAPTER_MODES:
+        failures.append("INVALID_CHAPTER_MODE")
+        mode = "STANDARD_LONG"
     if not isinstance(contract, dict):
         failures.append("TARGET_PROSE_CONTRACT_MISSING")
     else:
@@ -236,8 +241,7 @@ def audit_chapter_capacity(entity: dict) -> dict:
         if isinstance(refs, list) and any(ref not in cluster_ids for ref in refs):
             failures.append(f"SCENE_{index + 1}_CLUSTER_REFERENCE_BROKEN")
 
-    mode = str((contract or {}).get("chapter_mode", "STANDARD_LONG")).upper() if isinstance(contract, dict) else "STANDARD_LONG"
-    if mode in {"STANDARD_LONG", "MAJOR_LONG", "QUIET_LONG"}:
+    if mode in CHAPTER_MODES:
         if len(core_beats) < 4:
             failures.append("STAGEABLE_CORE_BEAT_SHORTFALL")
         if len(clusters) < 2:
@@ -281,9 +285,10 @@ def audit_chapter_set(packet: dict) -> list[dict]:
     errors: list[dict] = []
     numbers: list[int] = []
     for entity in plans:
-        if str((entity.get("payload") or {}).get("plan_level", "STORY_NODE")).upper() != "PRODUCTION_READY":
+        payload = entity.get("payload") if isinstance(entity.get("payload"), dict) else {}
+        if str(payload.get("plan_level", "STORY_NODE")).upper() != "PRODUCTION_READY":
             errors.append(_issue("CHAPTER_NOT_PRODUCTION_READY", "full-book detailed mode requires PRODUCTION_READY chapters", entity.get("id")))
-        number = (entity.get("payload") or {}).get("chapter_no")
+        number = payload.get("chapter_no")
         if not isinstance(number, int) or number < 1:
             errors.append(_issue("INVALID_CHAPTER_NUMBER", "chapter_no must be a positive integer", entity.get("id")))
         else:
@@ -291,7 +296,9 @@ def audit_chapter_set(packet: dict) -> list[dict]:
     if len(numbers) != len(set(numbers)):
         errors.append(_issue("DUPLICATE_CHAPTER_NUMBER", "chapter_no must be unique"))
     expected = precision.get("expected_chapters")
-    if expected is not None and (not isinstance(expected, int) or expected < 1):
+    if expected is None:
+        errors.append(_issue("EXPECTED_CHAPTERS_REQUIRED", "full-book detailed mode requires expected_chapters"))
+    elif not isinstance(expected, int) or expected < 1:
         errors.append(_issue("INVALID_EXPECTED_CHAPTERS", "expected_chapters must be a positive integer"))
     elif numbers:
         target = expected if isinstance(expected, int) else max(numbers)
@@ -1353,6 +1360,14 @@ def _cypher_literal(value: Any) -> str:
 
 
 class GraphProjector:
+    EDGE_PREFLIGHT = (
+        "UNWIND $edges AS row "
+        "OPTIONAL MATCH (s:Entity {id: row.source, project_id: $project_id}), "
+        "(t:Entity {id: row.target, project_id: $project_id}) "
+        "WITH row, s, t WHERE s IS NULL OR t IS NULL "
+        "RETURN row.id AS edge_id, row.source AS source_id, row.target AS target_id"
+    )
+
     QUERY_TEXTS = {
         "character_neighborhood": (
             "MATCH (a:Entity {id: $anchor_id, project_id: $project_id})-[r:REL*1..2]-(n:Entity {project_id: $project_id}) "
@@ -1483,6 +1498,16 @@ class GraphProjector:
             versions.append(int(change.get("version", 0)))
         cypher = (self.graph_dir / "projection.cypher").read_text(encoding="utf-8")
         self.ensure_schema()
+        preflight = self._run(self.EDGE_PREFLIGHT, {
+            "project_id": project_id,
+            "edges": edges,
+        })
+        rows = list(csv.reader(io.StringIO(preflight), delimiter="\t"))
+        if len(rows) > 1:
+            edge_id = rows[1][0] if rows[1] else "unknown"
+            raise ValidationError(
+                f"Neo4j edge endpoint is missing for {edge_id}", "NEO4J_ENDPOINT_MISSING", edge_id
+            )
         self._run(cypher, {
             "project_id": project_id,
             "canon_version": max(versions or [0]),
@@ -1570,15 +1595,18 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"project_id": args.project_id, "version": version}, ensure_ascii=False))
             return 0
         if args.command == "audit":
+            store = None
             if args.packet:
                 packet = json.loads(Path(args.packet).read_text(encoding="utf-8"))
+                if args.db and args.project_id:
+                    store = CanonicalStore(Path(args.db))
             elif args.db and args.project_id:
                 store = CanonicalStore(Path(args.db))
                 _, packet = store._load_packet(args.project_id)
             else:
                 raise ValidationError("audit needs --packet or --db plus --project-id", "INVALID_AUDIT_ARGS")
             report = audit_packet(packet)
-            if args.db and args.project_id:
+            if store is not None:
                 _append_graph_health(report, store.pending_changes(args.project_id), args.project_id)
             print(json.dumps(report.as_dict(), ensure_ascii=False))
             return 0 if report.ok else 2
