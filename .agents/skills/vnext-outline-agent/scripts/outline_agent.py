@@ -1,0 +1,1393 @@
+"""Deterministic Canon and graph-runtime primitives for the VNext outline Skill."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import io
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from urllib.parse import urlparse
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _sha256(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+class ValidationError(ValueError):
+    def __init__(self, message: str, code: str = "VALIDATION_ERROR", object_id: str | None = None):
+        super().__init__(message)
+        self.code = code
+        self.object_id = object_id
+
+
+@dataclass(frozen=True)
+class CommitResult:
+    project_id: str
+    version: int
+    snapshot_hash: str
+    outbox_count: int
+
+
+@dataclass
+class ProjectionResult:
+    applied: int
+    degraded: list[dict]
+
+
+@dataclass
+class AuditReport:
+    errors: list[dict]
+    warnings: list[dict]
+    counts: dict | None = None
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+    def as_dict(self) -> dict:
+        counts = self.counts or {"errors": len(self.errors), "warnings": len(self.warnings)}
+        return {"ok": self.ok, "errors": self.errors, "warnings": self.warnings, "counts": counts}
+
+
+def _append_graph_health(report: AuditReport, pending: list[dict], project_id: str) -> None:
+    if not pending:
+        return
+    degraded = [row for row in pending if row.get("projection_status") == "DEGRADED"]
+    if degraded:
+        detail = degraded[0].get("projection_error") or "graph projection is degraded"
+        report.warnings.append(_issue("GRAPH_DEGRADED", detail, project_id))
+    else:
+        report.warnings.append(_issue("GRAPH_PENDING", "graph projection has unapplied outbox changes", project_id))
+    if report.counts is not None:
+        report.counts["warnings"] = len(report.warnings)
+
+
+PLACEHOLDER_NAMES = (
+    "路人甲", "路人乙", "官员A", "官员B", "护卫一", "护卫二", "商人A",
+    "弟子一", "弟子二", "村民一", "村民二", "神秘人", "某个手下", "一个神秘人",
+)
+REQUIRED_CHARACTER_FIELDS = (
+    "identity", "desires", "goals", "interests", "constraints", "preferred_strategy",
+)
+REQUIRED_LIFE_PROFILE_FIELDS = (
+    "biography", "decision_model", "private_life", "life_constraints", "knowledge_state", "misjudgments", "arc", "fate", "highlights",
+)
+PROVENANCE_KINDS = {
+    "CHAR", "CHARACTER", "PERSON", "COHORT", "FACTION", "LOCATION", "RESOURCE",
+    "OBJECT", "PROP", "EVIDENCE", "RULE", "EVENT", "LINE", "PROMISE", "CLIMAX",
+    "ACT", "VOLUME", "TIMEPOINT", "CHAPTER_PLAN", "BEAT", "HUMAN_STATE",
+}
+CAUSAL_EDGE_TYPES = {"CAUSES", "PRECEDES", "RESULTS_IN"}
+PACKET_MODES = {"SNAPSHOT", "PATCH"}
+
+
+def _issue(code: str, message: str, object_id: str | None = None) -> dict:
+    return {"code": code, "message": message, "object_id": object_id}
+
+
+def audit_packet(packet: dict) -> AuditReport:
+    """Run deterministic checks that do not require literary interpretation."""
+    errors: list[dict] = []
+    warnings: list[dict] = []
+    if not isinstance(packet, dict):
+        return AuditReport([_issue("INVALID_PACKET", "packet must be an object")], warnings)
+    packet_mode = packet.get("packet_mode", "SNAPSHOT")
+    if not isinstance(packet_mode, str) or packet_mode.upper() not in PACKET_MODES:
+        errors.append(_issue("INVALID_PACKET_MODE", "packet_mode must be SNAPSHOT or PATCH"))
+    entities = packet.get("entities")
+    edges = packet.get("edges")
+    if not isinstance(entities, list) or not isinstance(edges, list):
+        return AuditReport([_issue("INVALID_PACKET", "entities and edges must be lists")], warnings)
+    if "negative_facts" in packet and not isinstance(packet["negative_facts"], list):
+        errors.append(_issue("INVALID_PACKET", "negative_facts must be a list"))
+    elif isinstance(packet.get("negative_facts"), list) and any(not isinstance(fact, str) for fact in packet["negative_facts"]):
+        errors.append(_issue("INVALID_PACKET", "negative_facts entries must be strings"))
+    for key in ("assumptions", "open_questions", "source_refs"):
+        if key in packet and not isinstance(packet[key], list):
+            errors.append(_issue("INVALID_PACKET", f"{key} must be a list"))
+        elif isinstance(packet.get(key), list) and any(not isinstance(value, str) for value in packet[key]):
+            errors.append(_issue("INVALID_PACKET", f"{key} entries must be strings"))
+    if "precision" in packet and not isinstance(packet["precision"], dict):
+        errors.append(_issue("INVALID_PACKET", "precision must be an object"))
+    source_registry = packet.get("provenance_registry")
+    if source_registry is not None and not isinstance(source_registry, (dict, list)):
+        errors.append(_issue("INVALID_PACKET", "provenance_registry must be an object or list"))
+    if isinstance(source_registry, list) and any(not isinstance(value, str) for value in source_registry):
+        errors.append(_issue("INVALID_PACKET", "provenance_registry list entries must be strings"))
+    known_sources = set(
+        source_registry if isinstance(source_registry, list) and all(isinstance(value, str) for value in source_registry)
+        else (source_registry.keys() if isinstance(source_registry, dict) else [])
+    )
+
+    entity_map: dict[str, dict] = {}
+    for entity in entities:
+        if not isinstance(entity, dict) or not isinstance(entity.get("id"), str) or not entity["id"]:
+            errors.append(_issue("INVALID_ENTITY", "entity requires a non-empty id"))
+            continue
+        entity_id = entity["id"]
+        if entity_id in entity_map:
+            errors.append(_issue("DUPLICATE_ID", "duplicate entity id", entity_id))
+            continue
+        entity_map[entity_id] = entity
+        kind = str(entity.get("kind", "UNKNOWN")).upper()
+        name = str(entity.get("name", ""))
+        payload = entity.get("payload")
+        if not isinstance(payload, dict):
+            errors.append(_issue("INVALID_PAYLOAD", "entity payload must be an object", entity_id))
+            payload = {}
+        if kind in {"CHAR", "CHARACTER", "PERSON"}:
+            if not name or name in PLACEHOLDER_NAMES or any(name.startswith(prefix) and name[-1:] in "一二三四五六七八九AB" for prefix in ("官员", "护卫", "商人", "弟子", "村民")):
+                errors.append(_issue("PLACEHOLDER_PERSON", "individual actor must have a real name", entity_id))
+            if any(not payload.get(field) for field in REQUIRED_CHARACTER_FIELDS):
+                errors.append(_issue("CHARACTER_WITHOUT_AGENCY", "character needs identity, desire, interest, constraints, and strategy", entity_id))
+            tier = str(payload.get("character_tier", "SUPPORT")).upper()
+            if tier not in {"CORE", "MAJOR", "SUPPORT", "EPHEMERAL", "COHORT"}:
+                errors.append(_issue("INVALID_CHARACTER_TIER", "character_tier must be CORE, MAJOR, SUPPORT, EPHEMERAL, or COHORT", entity_id))
+            if tier in {"CORE", "MAJOR"} and any(not payload.get(field) for field in REQUIRED_LIFE_PROFILE_FIELDS):
+                errors.append(_issue("CHARACTER_LIFE_PROFILE_MISSING", "core/major character needs biography, private life, decision model, arc, fate, and highlights", entity_id))
+        if kind in PROVENANCE_KINDS and not payload.get("provenance_refs"):
+            errors.append(_issue("MISSING_PROVENANCE", "important entity needs provenance_refs", entity_id))
+        if "provenance_refs" in payload and not isinstance(payload.get("provenance_refs"), list):
+            errors.append(_issue("INVALID_PROVENANCE", "provenance_refs must be a list", entity_id))
+        if known_sources and isinstance(payload.get("provenance_refs"), list):
+            for ref in payload["provenance_refs"]:
+                if ref not in known_sources:
+                    errors.append(_issue("UNKNOWN_PROVENANCE", "provenance reference is absent from provenance_registry", entity_id))
+
+    edge_map: dict[str, dict] = {}
+    adjacency: dict[str, list[str]] = {}
+    for edge in edges:
+        if not isinstance(edge, dict) or not isinstance(edge.get("id"), str) or not edge["id"]:
+            errors.append(_issue("INVALID_EDGE", "edge requires a non-empty id"))
+            continue
+        edge_id = edge["id"]
+        if edge_id in edge_map:
+            errors.append(_issue("DUPLICATE_ID", "duplicate edge id", edge_id))
+            continue
+        edge_map[edge_id] = edge
+        source, target = edge.get("source"), edge.get("target")
+        if source not in entity_map or target not in entity_map:
+            errors.append(_issue("BROKEN_REFERENCE", "edge endpoint does not exist", edge_id))
+            continue
+        edge_type = str(edge.get("type", "")).upper()
+        if edge_type in CAUSAL_EDGE_TYPES:
+            adjacency.setdefault(source, []).append(target)
+
+    for entity_id, entity in entity_map.items():
+        kind = str(entity.get("kind", "UNKNOWN")).upper()
+        payload = entity.get("payload") if isinstance(entity.get("payload"), dict) else {}
+        if kind == "EVENT":
+            actor = payload.get("active_actor") or payload.get("world_process_id")
+            if not actor or actor not in entity_map:
+                errors.append(_issue("ORPHAN_EVENT", "event needs an existing active_actor or world process", entity_id))
+            elif not any(
+                edge.get("target") == entity_id
+                and str(edge.get("type", "")).upper() == "PARTICIPATES_IN"
+                and edge.get("source") == actor
+                for edge in edge_map.values()
+            ):
+                errors.append(_issue("UNLINKED_CAUSAL_ACTOR", "event actor must participate in the event", entity_id))
+            if not payload.get("provenance_refs"):
+                errors.append(_issue("MISSING_PROVENANCE", "event needs provenance_refs", entity_id))
+            if not payload.get("causal_inputs") or not payload.get("causal_outputs"):
+                errors.append(_issue("EVENT_CAUSAL_FIELDS_MISSING", "event needs causal_inputs and causal_outputs", entity_id))
+            if not payload.get("action") or not payload.get("state_delta"):
+                errors.append(_issue("EVENT_ACTION_MISSING", "event needs an action and a state delta", entity_id))
+            for field in ("causal_inputs", "causal_outputs"):
+                refs = payload.get(field, [])
+                if isinstance(refs, list):
+                    for ref in refs:
+                        if ref not in entity_map:
+                            errors.append(_issue("BROKEN_REFERENCE", f"event {field} references an unknown entity", entity_id))
+            causal_pairs = {
+                (edge.get("source"), edge.get("target"))
+                for edge in edge_map.values()
+                if str(edge.get("type", "")).upper() in {"CAUSES", "RESULTS_IN"}
+            }
+            for ref in payload.get("causal_inputs", []) if isinstance(payload.get("causal_inputs"), list) else []:
+                if str(entity_map.get(ref, {}).get("kind", "")).upper() == "EVENT" and (ref, entity_id) not in causal_pairs:
+                    errors.append(_issue("CAUSAL_INPUT_EDGE_MISSING", "event causal input needs a matching CAUSES/RESULTS_IN edge", entity_id))
+            for ref in payload.get("causal_outputs", []) if isinstance(payload.get("causal_outputs"), list) else []:
+                if str(entity_map.get(ref, {}).get("kind", "")).upper() == "EVENT" and (entity_id, ref) not in causal_pairs:
+                    errors.append(_issue("CAUSAL_OUTPUT_EDGE_MISSING", "event causal output needs a matching CAUSES/RESULTS_IN edge", entity_id))
+            for field in ("location",):
+                ref = payload.get(field)
+                if ref and ref not in entity_map:
+                    errors.append(_issue("BROKEN_REFERENCE", f"event {field} references an unknown entity", entity_id))
+            if "time_index" in payload and not isinstance(payload.get("time_index"), (int, float)):
+                errors.append(_issue("INVALID_TIME_INDEX", "event time_index must be numeric", entity_id))
+            for ref in payload.get("line_refs", []) if isinstance(payload.get("line_refs"), list) else []:
+                if ref not in entity_map:
+                    errors.append(_issue("BROKEN_REFERENCE", "event line_refs references an unknown line", entity_id))
+            if payload.get("requires_hyperedge"):
+                participants = [
+                    edge for edge in edge_map.values()
+                    if edge.get("target") == entity_id and str(edge.get("type", "")).upper() == "PARTICIPATES_IN"
+                ]
+                if len(participants) < 2:
+                    errors.append(_issue("HYPEREDGE_PARTICIPANT_SHORTFALL", "compound event needs at least two participants", entity_id))
+                roles = {edge.get("payload", {}).get("role") for edge in participants if isinstance(edge.get("payload"), dict)}
+                if "initiator" not in roles:
+                    errors.append(_issue("HYPEREDGE_INITIATOR_MISSING", "compound event needs an initiator role", entity_id))
+        if kind == "LINE":
+            if not payload.get("owner"):
+                errors.append(_issue("UNOWNED_NARRATIVE_LINE", "line needs an owner", entity_id))
+            elif payload["owner"] not in entity_map:
+                errors.append(_issue("BROKEN_REFERENCE", "line owner does not exist", entity_id))
+            if not payload.get("closure_condition"):
+                errors.append(_issue("UNCLOSED_MAJOR_LINE", "line needs a closure condition", entity_id))
+            line_status = str(payload.get("status", entity.get("status", "ACTIVE"))).upper()
+            if line_status in {"CLOSED", "RESOLVED", "PAID_OFF"} and not payload.get("closure_event"):
+                errors.append(_issue("CLOSED_LINE_WITHOUT_EVENT", "closed line needs a closure_event", entity_id))
+        if kind == "PROMISE":
+            required = ("creation_event", "maturity_condition", "reveal_window", "payoff_event")
+            if any(not payload.get(field) for field in required):
+                errors.append(_issue("UNRESOLVED_CORE_PROMISE", "promise needs creation, maturity, reveal, and payoff", entity_id))
+            for field in ("creation_event", "payoff_event"):
+                ref = payload.get(field)
+                if ref and ref not in entity_map:
+                    errors.append(_issue("BROKEN_REFERENCE", f"promise {field} references an unknown entity", entity_id))
+            promise_status = str(payload.get("status", entity.get("status", "ACTIVE"))).upper()
+            if promise_status in {"PAID_OFF", "RESOLVED"} and not payload.get("payoff_event"):
+                errors.append(_issue("PAID_PROMISE_WITHOUT_PAYOFF", "paid-off promise needs a payoff_event", entity_id))
+            for field in ("who_knows", "who_misunderstands", "reinforcement_events", "choices_affected"):
+                refs = payload.get(field, [])
+                if isinstance(refs, list):
+                    for ref in refs:
+                        if ref not in entity_map:
+                            errors.append(_issue("BROKEN_REFERENCE", f"promise {field} references an unknown entity", entity_id))
+
+        if kind in {"CHAPTER_PLAN", "BEAT"}:
+            level = str(payload.get("plan_level", "STORY_NODE")).upper()
+            if level not in {"STORY_NODE", "DETAILED_PLAN", "PRODUCTION_READY"}:
+                errors.append(_issue("INVALID_PLAN_LEVEL", "plan_level must be STORY_NODE, DETAILED_PLAN, or PRODUCTION_READY", entity_id))
+            if level in {"DETAILED_PLAN", "PRODUCTION_READY"}:
+                required = ("dynamic_beats", "line_clusters", "scene_payloads")
+                if any(not isinstance(payload.get(field), list) or not payload[field] for field in required):
+                    errors.append(_issue("CAPACITY_GATE_FAILED", "detailed plan needs dynamic beats, line clusters, and scene payloads", entity_id))
+            if level == "PRODUCTION_READY" and not (
+                str(payload.get("expansion_status", "")).upper() == "FULL"
+                and str(payload.get("mid_chapter_load", "")).upper() == "PASS"
+                and payload.get("anti_self_certification") is True
+            ):
+                errors.append(_issue("CAPACITY_GATE_FAILED", "production-ready plan needs FULL expansion, PASS mid-chapter load, and anti-self-certification", entity_id))
+        if kind == "HUMAN_STATE":
+            required = ("bodily_state", "daily_routine", "social_obligations", "immediate_need")
+            if any(not payload.get(field) for field in required):
+                errors.append(_issue("HUMAN_REALITY_PROFILE_MISSING", "human state needs body, routine, obligations, and immediate need", entity_id))
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(node: str) -> None:
+        if node in visiting:
+            errors.append(_issue("CAUSAL_CYCLE", "causal event graph contains a cycle", node))
+            return
+        if node in visited:
+            return
+        visiting.add(node)
+        for child in adjacency.get(node, []):
+            visit(child)
+        visiting.remove(node)
+        visited.add(node)
+
+    for node in adjacency:
+        visit(node)
+
+    for edge in edge_map.values():
+        if str(edge.get("type", "")).upper() != "PRECEDES":
+            continue
+        source = entity_map.get(edge.get("source"), {})
+        target = entity_map.get(edge.get("target"), {})
+        source_time = (source.get("payload") or {}).get("time_index")
+        target_time = (target.get("payload") or {}).get("time_index")
+        if isinstance(source_time, (int, float)) and isinstance(target_time, (int, float)) and source_time > target_time:
+            errors.append(_issue("CAUSAL_ORDER_CONFLICT", "PRECEDES edge runs backward in story time", edge.get("id")))
+
+    return AuditReport(errors, warnings, {
+        "entities": len(entity_map), "edges": len(edge_map),
+        "errors": len(errors), "warnings": len(warnings),
+    })
+
+
+def build_context_from_packet(packet: dict, anchors: list[str], max_hops: int = 2) -> dict:
+    """Build a bounded, provenance-preserving context without inventing facts."""
+    entities = {item["id"]: item for item in packet.get("entities", []) if isinstance(item, dict) and item.get("id")}
+    edges = [item for item in packet.get("edges", []) if isinstance(item, dict)]
+    missing = [anchor for anchor in anchors if anchor not in entities]
+    adjacency: dict[str, set[str]] = {}
+    for edge in edges:
+        source, target = edge.get("source"), edge.get("target")
+        if source in entities and target in entities:
+            adjacency.setdefault(source, set()).add(target)
+            adjacency.setdefault(target, set()).add(source)
+
+    reachable = set(anchors)
+    frontier = set(anchors)
+    for _ in range(max(0, max_hops)):
+        next_frontier = set().union(*(adjacency.get(node, set()) for node in frontier)) if frontier else set()
+        next_frontier -= reachable
+        reachable |= next_frontier
+        frontier = next_frontier
+
+    def entity_kind(kind: str | set[str]) -> list[dict]:
+        kinds = {kind} if isinstance(kind, str) else {value.upper() for value in kind}
+        return [
+            entities[entity_id]
+            for entity_id in sorted(reachable)
+            if str(entities[entity_id].get("kind", "")).upper() in kinds
+        ]
+
+    hyperedges: list[dict] = []
+    role_order = {"initiator": 0, "target": 1, "evidence": 2, "location": 3}
+    for event in sorted(entity_kind("EVENT"), key=lambda item: item["id"]):
+        participants = []
+        for edge in edges:
+            if edge.get("target") != event["id"] or str(edge.get("type", "")).upper() != "PARTICIPATES_IN":
+                continue
+            if edge.get("source") not in entities:
+                continue
+            payload = edge.get("payload") if isinstance(edge.get("payload"), dict) else {}
+            participants.append({
+                "id": edge["source"],
+                "kind": entities[edge["source"]].get("kind"),
+                "role": payload.get("role", "participant"),
+                "edge_id": edge.get("id"),
+            })
+        if participants:
+            participants.sort(key=lambda item: (role_order.get(item["role"], 99), item["id"]))
+            hyperedges.append({"event_id": event["id"], "participants": participants})
+
+    relevant_edges = sorted([
+        edge for edge in edges
+        if edge.get("source") in reachable or edge.get("target") in reachable
+    ], key=lambda item: item.get("id", ""))
+    hard_canon = [
+        entities[entity_id] for entity_id in sorted(reachable)
+        if str(entities[entity_id].get("namespace", "")).upper() == "CANON"
+    ]
+    plan = [
+        entities[entity_id] for entity_id in sorted(reachable)
+        if str(entities[entity_id].get("namespace", "")).upper() == "PLAN"
+    ]
+    negative_facts = sorted(str(fact) for fact in packet.get("negative_facts", []))
+    missing_sections = []
+    if missing:
+        missing_sections.append("anchors")
+    if not hard_canon and not plan:
+        missing_sections.append("state")
+    if not hyperedges and any(str(entity.get("kind", "")).upper() == "EVENT" for entity in plan):
+        missing_sections.append("event_participants")
+    return {
+        "assumptions": list(packet.get("assumptions", [])),
+        "open_questions": list(packet.get("open_questions", [])),
+        "source_refs": list(packet.get("source_refs", [])),
+        "precision": dict(packet.get("precision", {})),
+        "hard_canon": hard_canon,
+        "plan": plan,
+        "character_states": entity_kind({"CHARACTER", "CHAR", "PERSON", "COHORT"}),
+        "relationships": relevant_edges,
+        "causal_paths": [edge for edge in relevant_edges if str(edge.get("type", "")).upper() in CAUSAL_EDGE_TYPES],
+        "active_lines": entity_kind("LINE"),
+        "promises": entity_kind("PROMISE"),
+        "timeline_facts": sorted(
+            [entities[entity] for entity in reachable if entity in entities and "time_index" in (entities[entity].get("payload") or {})],
+            key=lambda item: ((item.get("payload") or {}).get("time_index", float("inf")), item["id"]),
+        ),
+        "hyperedges": hyperedges,
+        "negative_facts": negative_facts,
+        "provenance_refs": sorted({ref for entity_id in reachable for ref in (entities[entity_id].get("payload") or {}).get("provenance_refs", [])}),
+        "retrieval_sufficiency": "SUFFICIENT" if not missing_sections else "INSUFFICIENT",
+        "missing": missing_sections,
+    }
+
+
+def build_context_with_graph(
+    packet: dict,
+    project_id: str,
+    anchors: list[str],
+    max_hops: int = 2,
+    source: str = "auto",
+    projector: GraphProjector | None = None,
+) -> dict:
+    """Prefer Neo4j retrieval when requested, with an explicit local fallback."""
+    if source not in {"sqlite", "neo4j", "auto"}:
+        raise ValidationError("context source must be sqlite, neo4j, or auto", "INVALID_CONTEXT_SOURCE")
+    context = build_context_from_packet(packet, anchors, max_hops)
+    context["retrieval_source"] = "SQLITE"
+    if source == "sqlite":
+        return context
+    projector = projector or GraphProjector()
+    try:
+        rows = []
+        for anchor in anchors:
+            rows.extend(projector.query("character_neighborhood", {"project_id": project_id, "anchor_id": anchor}))
+        context["graph_retrieval"] = rows
+        context["retrieval_source"] = "NEO4J"
+        context["graph_status"] = {"status": "OK"}
+        return context
+    except ValidationError as error:
+        if source == "neo4j":
+            raise
+        context["graph_status"] = {"status": "DEGRADED", "code": error.code, "message": str(error)}
+        return context
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS projects(
+  project_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS entities(
+  project_id TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  namespace TEXT NOT NULL,
+  status TEXT NOT NULL,
+  name TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY(project_id, entity_id),
+  FOREIGN KEY(project_id) REFERENCES projects(project_id)
+);
+CREATE TABLE IF NOT EXISTS edges(
+  project_id TEXT NOT NULL,
+  edge_id TEXT NOT NULL,
+  edge_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  namespace TEXT NOT NULL,
+  status TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY(project_id, edge_id),
+  FOREIGN KEY(project_id) REFERENCES projects(project_id)
+);
+CREATE TABLE IF NOT EXISTS commits(
+  project_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  parent_version INTEGER,
+  message TEXT NOT NULL,
+  snapshot_hash TEXT NOT NULL,
+  snapshot_json TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, version),
+  FOREIGN KEY(project_id) REFERENCES projects(project_id)
+);
+CREATE TABLE IF NOT EXISTS changes(
+  change_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  before_json TEXT,
+  after_json TEXT NOT NULL,
+  projection_status TEXT NOT NULL DEFAULT 'PENDING',
+  projection_error TEXT,
+  FOREIGN KEY(project_id) REFERENCES projects(project_id)
+);
+CREATE TABLE IF NOT EXISTS negative_facts(
+  project_id TEXT NOT NULL,
+  fact TEXT NOT NULL,
+  PRIMARY KEY(project_id, fact),
+  FOREIGN KEY(project_id) REFERENCES projects(project_id)
+);
+CREATE TABLE IF NOT EXISTS packet_metadata(
+  project_id TEXT PRIMARY KEY,
+  assumptions_json TEXT NOT NULL,
+  open_questions_json TEXT NOT NULL,
+  source_refs_json TEXT NOT NULL,
+  precision_json TEXT NOT NULL,
+  provenance_registry_json TEXT NOT NULL DEFAULT '{}',
+  FOREIGN KEY(project_id) REFERENCES projects(project_id)
+);
+"""
+
+
+class CanonicalStore:
+    def __init__(self, db_path: Path):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.executescript(SCHEMA)
+        commit_columns = {row[1] for row in connection.execute("PRAGMA table_info(commits)")}
+        if "snapshot_json" not in commit_columns:
+            connection.execute("ALTER TABLE commits ADD COLUMN snapshot_json TEXT")
+        metadata_columns = {row[1] for row in connection.execute("PRAGMA table_info(packet_metadata)")}
+        if "provenance_registry_json" not in metadata_columns:
+            connection.execute("ALTER TABLE packet_metadata ADD COLUMN provenance_registry_json TEXT NOT NULL DEFAULT '{}'")
+        return connection
+
+    @staticmethod
+    def _snapshot(packet: dict) -> dict:
+        return {
+            "packet_mode": "SNAPSHOT",
+            "entities": sorted(packet.get("entities", []), key=lambda item: item["id"]),
+            "edges": sorted(packet.get("edges", []), key=lambda item: item["id"]),
+            "negative_facts": sorted(set(packet.get("negative_facts", []))),
+            "assumptions": list(packet.get("assumptions", [])),
+            "open_questions": list(packet.get("open_questions", [])),
+            "source_refs": list(packet.get("source_refs", [])),
+            "precision": dict(packet.get("precision", {})),
+            "provenance_registry": packet.get("provenance_registry", {}),
+        }
+
+    @staticmethod
+    def _merge_patch(base: dict, patch: dict) -> dict:
+        def merge_items(key: str) -> list[dict]:
+            combined = {item["id"]: item for item in base.get(key, [])}
+            combined.update({item["id"]: item for item in patch.get(key, [])})
+            return sorted(combined.values(), key=lambda item: item["id"])
+
+        merged = {
+            "packet_mode": "SNAPSHOT",
+            "entities": merge_items("entities"),
+            "edges": merge_items("edges"),
+            "negative_facts": sorted(set(base.get("negative_facts", [])) | set(patch.get("negative_facts", []))),
+        }
+        for key, default in (("assumptions", []), ("open_questions", []), ("source_refs", []), ("precision", {})):
+            merged[key] = patch[key] if key in patch else base.get(key, default)
+        merged["provenance_registry"] = patch.get("provenance_registry", base.get("provenance_registry", {}))
+        return merged
+
+    def init_project(self, project_id: str, title: str) -> int:
+        if not project_id or not title:
+            raise ValidationError("project_id and title are required", "PROJECT_FIELDS_REQUIRED")
+        now = _now()
+        empty_snapshot = self._snapshot({"entities": [], "edges": [], "negative_facts": []})
+        empty_hash = _sha256(empty_snapshot)
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT version FROM projects WHERE project_id = ?", (project_id,)
+            ).fetchone()
+            if existing is not None:
+                return int(existing["version"])
+            connection.execute(
+                "INSERT INTO projects(project_id,title,version,created_at,updated_at) VALUES(?,?,?,?,?)",
+                (project_id, title, 0, now, now),
+            )
+            empty_snapshot_json = _canonical_json(empty_snapshot)
+            connection.execute(
+                "INSERT INTO commits(project_id,version,parent_version,message,snapshot_hash,snapshot_json,created_at) VALUES(?,?,?,?,?,?,?)",
+                (project_id, 0, None, "init", empty_hash, empty_snapshot_json, now),
+            )
+        return 0
+
+    def get_version(self, project_id: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT version FROM projects WHERE project_id = ?", (project_id,)
+            ).fetchone()
+        if row is None:
+            raise ValidationError(f"unknown project: {project_id}", "PROJECT_NOT_FOUND", project_id)
+        return int(row["version"])
+
+    def load_snapshot(self, project_id: str, version: int | None = None) -> dict:
+        with self._connect() as connection:
+            project = connection.execute(
+                "SELECT version FROM projects WHERE project_id = ?", (project_id,)
+            ).fetchone()
+            if project is None:
+                raise ValidationError(f"unknown project: {project_id}", "PROJECT_NOT_FOUND", project_id)
+            target = int(project["version"] if version is None else version)
+            row = connection.execute(
+                "SELECT snapshot_json FROM commits WHERE project_id = ? AND version = ?",
+                (project_id, target),
+            ).fetchone()
+        if row is None:
+            raise ValidationError(f"unknown version: {target}", "VERSION_NOT_FOUND", project_id)
+        if not row["snapshot_json"]:
+            raise ValidationError(f"snapshot is unavailable for version {target}", "SNAPSHOT_UNAVAILABLE", project_id)
+        return json.loads(row["snapshot_json"])
+
+    @staticmethod
+    def _validate_packet_shape(packet: dict) -> None:
+        if not isinstance(packet, dict):
+            raise ValidationError("packet must be an object", "INVALID_PACKET")
+        for key in ("entities", "edges"):
+            if not isinstance(packet.get(key), list):
+                raise ValidationError(f"packet.{key} must be a list", "INVALID_PACKET")
+        for collection, key in ((packet["entities"], "id"), (packet["edges"], "id")):
+            seen: set[str] = set()
+            for item in collection:
+                if not isinstance(item, dict) or not isinstance(item.get(key), str) or not item[key]:
+                    raise ValidationError(f"every {key} entry must be a non-empty string", "INVALID_PACKET")
+                if item[key] in seen:
+                    raise ValidationError(f"duplicate id: {item[key]}", "DUPLICATE_ID", item[key])
+                seen.add(item[key])
+        mode = packet.get("packet_mode", "SNAPSHOT")
+        if not isinstance(mode, str) or mode.upper() not in PACKET_MODES:
+            raise ValidationError("packet_mode must be SNAPSHOT or PATCH", "INVALID_PACKET_MODE")
+        for key in ("negative_facts", "assumptions", "open_questions", "source_refs"):
+            if key in packet and not isinstance(packet[key], list):
+                raise ValidationError(f"packet.{key} must be a list", "INVALID_PACKET")
+            if key in packet and any(not isinstance(value, str) for value in packet[key]):
+                raise ValidationError(f"packet.{key} entries must be strings", "INVALID_PACKET")
+        if "precision" in packet and not isinstance(packet["precision"], dict):
+            raise ValidationError("packet.precision must be an object", "INVALID_PACKET")
+        registry = packet.get("provenance_registry")
+        if registry is not None and not isinstance(registry, (dict, list)):
+            raise ValidationError("packet.provenance_registry must be an object or list", "INVALID_PACKET")
+        if isinstance(registry, list) and any(not isinstance(value, str) for value in registry):
+            raise ValidationError("packet.provenance_registry entries must be strings", "INVALID_PACKET")
+
+    @staticmethod
+    def _entity_row(project_id: str, item: dict) -> tuple[str, str, str, str, str, str, str]:
+        payload = item.get("payload", {})
+        if not isinstance(payload, dict):
+            raise ValidationError("entity payload must be an object", "INVALID_PAYLOAD", item["id"])
+        return (
+            project_id,
+            item["id"],
+            str(item.get("kind", "UNKNOWN")),
+            str(item.get("namespace", "PLAN")),
+            str(item.get("status", "ACTIVE")),
+            str(item.get("name", item["id"])),
+            _canonical_json(payload),
+        )
+
+    @staticmethod
+    def _edge_row(project_id: str, item: dict) -> tuple[str, str, str, str, str, str, str, str]:
+        payload = item.get("payload", {})
+        if not isinstance(payload, dict):
+            raise ValidationError("edge payload must be an object", "INVALID_PAYLOAD", item["id"])
+        source = item.get("source")
+        target = item.get("target")
+        if not isinstance(source, str) or not isinstance(target, str):
+            raise ValidationError("edge source and target are required", "EDGE_ENDPOINT_REQUIRED", item["id"])
+        return (
+            project_id,
+            item["id"],
+            str(item.get("type", "RELATED_TO")),
+            source,
+            target,
+            str(item.get("namespace", "PLAN")),
+            str(item.get("status", "ACTIVE")),
+            _canonical_json(payload),
+        )
+
+    def apply_packet(
+        self, project_id: str, packet: dict, expected_version: int, message: str
+    ) -> CommitResult:
+        self._validate_packet_shape(packet)
+        mode = str(packet.get("packet_mode", "SNAPSHOT")).upper()
+        effective_packet = packet
+        if mode == "PATCH":
+            _, base_packet = self._load_packet(project_id)
+            effective_packet = self._merge_patch(base_packet, packet)
+        report = audit_packet(effective_packet)
+        if not report.ok:
+            first = report.errors[0]
+            raise ValidationError(first["message"], first["code"], first.get("object_id"))
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            project = connection.execute(
+                "SELECT version FROM projects WHERE project_id = ?", (project_id,)
+            ).fetchone()
+            if project is None:
+                raise ValidationError(f"unknown project: {project_id}", "PROJECT_NOT_FOUND", project_id)
+            current_version = int(project["version"])
+            if current_version != expected_version:
+                raise ValidationError(
+                    f"expected version {expected_version}, found {current_version}",
+                    "VERSION_CONFLICT",
+                    project_id,
+                )
+
+            snapshot = self._snapshot(effective_packet)
+            snapshot_hash = _sha256(snapshot)
+            latest = connection.execute(
+                "SELECT snapshot_hash FROM commits WHERE project_id = ? AND version = ?",
+                (project_id, current_version),
+            ).fetchone()
+            if latest is not None and latest["snapshot_hash"] == snapshot_hash:
+                return CommitResult(project_id, current_version, snapshot_hash, 0)
+
+            next_version = current_version + 1
+            changes: list[tuple[str, str, str, str | None, str]] = []
+            entity_rows = [self._entity_row(project_id, item) for item in effective_packet["entities"]]
+            edge_rows = [self._edge_row(project_id, item) for item in effective_packet["edges"]]
+
+            if mode == "SNAPSHOT":
+                wanted_entities = {row[1] for row in entity_rows}
+                old_entities = connection.execute(
+                    "SELECT * FROM entities WHERE project_id = ?", (project_id,)
+                ).fetchall()
+                for old in old_entities:
+                    if old["entity_id"] in wanted_entities:
+                        continue
+                    before = json.dumps(dict(old), ensure_ascii=False, sort_keys=True)
+                    connection.execute(
+                        "DELETE FROM entities WHERE project_id = ? AND entity_id = ?",
+                        (project_id, old["entity_id"]),
+                    )
+                    changes.append(("ENTITY", old["entity_id"], "DELETE", before, "{}"))
+                wanted_edges = {row[1] for row in edge_rows}
+                old_edges = connection.execute(
+                    "SELECT * FROM edges WHERE project_id = ?", (project_id,)
+                ).fetchall()
+                for old in old_edges:
+                    if old["edge_id"] in wanted_edges:
+                        continue
+                    before = json.dumps(dict(old), ensure_ascii=False, sort_keys=True)
+                    connection.execute(
+                        "DELETE FROM edges WHERE project_id = ? AND edge_id = ?",
+                        (project_id, old["edge_id"]),
+                    )
+                    changes.append(("EDGE", old["edge_id"], "DELETE", before, "{}"))
+
+            for row in entity_rows:
+                old = connection.execute(
+                    "SELECT * FROM entities WHERE project_id = ? AND entity_id = ?",
+                    (project_id, row[1]),
+                ).fetchone()
+                before = json.dumps(dict(old), ensure_ascii=False, sort_keys=True) if old else None
+                connection.execute(
+                    """INSERT INTO entities(project_id,entity_id,kind,namespace,status,name,payload_json)
+                    VALUES(?,?,?,?,?,?,?)
+                    ON CONFLICT(project_id,entity_id) DO UPDATE SET
+                      kind=excluded.kind, namespace=excluded.namespace, status=excluded.status,
+                      name=excluded.name, payload_json=excluded.payload_json""",
+                    row,
+                )
+                after = json.dumps(
+                    {
+                        "project_id": row[0],
+                        "entity_id": row[1],
+                        "kind": row[2],
+                        "namespace": row[3],
+                        "status": row[4],
+                        "name": row[5],
+                        "payload_json": row[6],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                changes.append(("ENTITY", row[1], "UPSERT", before, after))
+
+            for row in edge_rows:
+                old = connection.execute(
+                    "SELECT * FROM edges WHERE project_id = ? AND edge_id = ?",
+                    (project_id, row[1]),
+                ).fetchone()
+                before = json.dumps(dict(old), ensure_ascii=False, sort_keys=True) if old else None
+                connection.execute(
+                    """INSERT INTO edges(project_id,edge_id,edge_type,source_id,target_id,namespace,status,payload_json)
+                    VALUES(?,?,?,?,?,?,?,?)
+                    ON CONFLICT(project_id,edge_id) DO UPDATE SET
+                      edge_type=excluded.edge_type, source_id=excluded.source_id,
+                      target_id=excluded.target_id, namespace=excluded.namespace,
+                      status=excluded.status, payload_json=excluded.payload_json""",
+                    row,
+                )
+                after = json.dumps(
+                    {
+                        "project_id": row[0],
+                        "edge_id": row[1],
+                        "edge_type": row[2],
+                        "source_id": row[3],
+                        "target_id": row[4],
+                        "namespace": row[5],
+                        "status": row[6],
+                        "payload_json": row[7],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                changes.append(("EDGE", row[1], "UPSERT", before, after))
+
+            connection.execute("DELETE FROM negative_facts WHERE project_id = ?", (project_id,))
+            negative_facts = effective_packet.get("negative_facts", [])
+            if not isinstance(negative_facts, list):
+                raise ValidationError("packet.negative_facts must be a list", "INVALID_PACKET")
+            connection.executemany(
+                "INSERT INTO negative_facts(project_id, fact) VALUES(?, ?)",
+                [(project_id, fact) for fact in sorted(set(negative_facts))],
+            )
+            assumptions = effective_packet.get("assumptions", [])
+            open_questions = effective_packet.get("open_questions", [])
+            source_refs = effective_packet.get("source_refs", [])
+            precision = effective_packet.get("precision", {})
+            if not all(isinstance(value, list) for value in (assumptions, open_questions, source_refs)):
+                raise ValidationError("assumptions, open_questions, and source_refs must be lists", "INVALID_PACKET")
+            if not isinstance(precision, dict):
+                raise ValidationError("precision must be an object", "INVALID_PACKET")
+            connection.execute(
+                """INSERT INTO packet_metadata(project_id, assumptions_json, open_questions_json,
+                   source_refs_json, precision_json, provenance_registry_json) VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(project_id) DO UPDATE SET
+                     assumptions_json=excluded.assumptions_json,
+                     open_questions_json=excluded.open_questions_json,
+                     source_refs_json=excluded.source_refs_json,
+                     precision_json=excluded.precision_json,
+                     provenance_registry_json=excluded.provenance_registry_json""",
+                (
+                    project_id,
+                    _canonical_json(assumptions),
+                    _canonical_json(open_questions),
+                    _canonical_json(source_refs),
+                    _canonical_json(precision),
+                    _canonical_json(effective_packet.get("provenance_registry", {})),
+                ),
+            )
+
+            now = _now()
+            connection.execute(
+                "INSERT INTO commits(project_id,version,parent_version,message,snapshot_hash,snapshot_json,created_at) VALUES(?,?,?,?,?,?,?)",
+                (project_id, next_version, current_version, message, snapshot_hash, _canonical_json(snapshot), now),
+            )
+            connection.executemany(
+                """INSERT INTO changes(project_id,version,object_type,object_id,action,before_json,after_json)
+                VALUES(?,?,?,?,?,?,?)""",
+                [(project_id, next_version, *change) for change in changes],
+            )
+            connection.execute(
+                "UPDATE projects SET version = ?, updated_at = ? WHERE project_id = ?",
+                (next_version, now, project_id),
+            )
+        return CommitResult(project_id, next_version, snapshot_hash, len(changes))
+
+    def _load_packet(self, project_id: str) -> tuple[str, dict]:
+        with self._connect() as connection:
+            project = connection.execute(
+                "SELECT title FROM projects WHERE project_id = ?", (project_id,)
+            ).fetchone()
+            if project is None:
+                raise ValidationError(f"unknown project: {project_id}", "PROJECT_NOT_FOUND", project_id)
+            entity_rows = connection.execute(
+                "SELECT * FROM entities WHERE project_id = ? ORDER BY entity_id", (project_id,)
+            ).fetchall()
+            edge_rows = connection.execute(
+                "SELECT * FROM edges WHERE project_id = ? ORDER BY edge_id", (project_id,)
+            ).fetchall()
+            negative_rows = connection.execute(
+                "SELECT fact FROM negative_facts WHERE project_id = ? ORDER BY fact", (project_id,)
+            ).fetchall()
+            metadata = connection.execute(
+                "SELECT * FROM packet_metadata WHERE project_id = ?", (project_id,)
+            ).fetchone()
+        entities = []
+        for row in entity_rows:
+            entities.append({
+                "id": row["entity_id"], "kind": row["kind"], "namespace": row["namespace"],
+                "status": row["status"], "name": row["name"], "payload": json.loads(row["payload_json"]),
+            })
+        edges = []
+        for row in edge_rows:
+            edges.append({
+                "id": row["edge_id"], "type": row["edge_type"], "source": row["source_id"],
+                "target": row["target_id"], "namespace": row["namespace"], "status": row["status"],
+                "payload": json.loads(row["payload_json"]),
+            })
+        packet = {
+            "entities": entities,
+            "edges": edges,
+            "negative_facts": [str(row["fact"]) for row in negative_rows],
+        }
+        if metadata is not None:
+            packet.update({
+                "assumptions": json.loads(metadata["assumptions_json"]),
+                "open_questions": json.loads(metadata["open_questions_json"]),
+                "source_refs": json.loads(metadata["source_refs_json"]),
+                "precision": json.loads(metadata["precision_json"]),
+                "provenance_registry": json.loads(metadata["provenance_registry_json"] or "{}"),
+            })
+        return str(project["title"]), packet
+
+    def pending_changes(self, project_id: str) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM changes WHERE project_id = ? AND projection_status IN ('PENDING', 'DEGRADED') ORDER BY change_id",
+                (project_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_projection(self, change_ids: list[int], status: str, error: str | None = None) -> None:
+        if status not in {"APPLIED", "DEGRADED"}:
+            raise ValidationError("invalid projection status", "INVALID_PROJECTION_STATUS")
+        with self._connect() as connection:
+            connection.executemany(
+                "UPDATE changes SET projection_status = ?, projection_error = ? WHERE change_id = ?",
+                [(status, error, change_id) for change_id in change_ids],
+            )
+
+    def rebuild_changes(self, project_id: str) -> int:
+        """Queue a complete Canon projection without changing the Canon version."""
+        with self._connect() as connection:
+            project = connection.execute(
+                "SELECT version FROM projects WHERE project_id = ?", (project_id,)
+            ).fetchone()
+            if project is None:
+                raise ValidationError(f"unknown project: {project_id}", "PROJECT_NOT_FOUND", project_id)
+            version = int(project["version"])
+            pending_keys = {
+                (row["object_type"], row["object_id"], int(row["version"]))
+                for row in connection.execute(
+                    "SELECT object_type, object_id, version FROM changes WHERE project_id = ? AND projection_status IN ('PENDING', 'DEGRADED')",
+                    (project_id,),
+                )
+            }
+            rows: list[tuple] = []
+            for row in connection.execute(
+                "SELECT * FROM entities WHERE project_id = ? ORDER BY entity_id", (project_id,)
+            ):
+                after = json.dumps(dict(row), ensure_ascii=False, sort_keys=True)
+                if ("ENTITY", row["entity_id"], version) not in pending_keys:
+                    rows.append((project_id, version, "ENTITY", row["entity_id"], "UPSERT", None, after))
+            for row in connection.execute(
+                "SELECT * FROM edges WHERE project_id = ? ORDER BY edge_id", (project_id,)
+            ):
+                after = json.dumps(dict(row), ensure_ascii=False, sort_keys=True)
+                if ("EDGE", row["edge_id"], version) not in pending_keys:
+                    rows.append((project_id, version, "EDGE", row["edge_id"], "UPSERT", None, after))
+            connection.executemany(
+                """INSERT INTO changes(project_id,version,object_type,object_id,action,before_json,after_json)
+                VALUES(?,?,?,?,?,?,?)""",
+                rows,
+            )
+        return len(rows)
+
+    def export_markdown(self, project_id: str, output_path: Path) -> Path:
+        title, packet = self._load_packet(project_id)
+        content = render_packet_markdown(packet, title=title, project_id=project_id)
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".outline-", suffix=".tmp", dir=output_path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            os.replace(temporary, output_path)
+        except Exception:
+            Path(temporary).unlink(missing_ok=True)
+            raise
+        return output_path
+
+    def export_audit(self, project_id: str, output_path: Path) -> Path:
+        title, packet = self._load_packet(project_id)
+        report = audit_packet(packet)
+        _append_graph_health(report, self.pending_changes(project_id), project_id)
+        lines = [f"# Audit Report: {title}", "", f"- project_id: `{project_id}`", f"- ok: `{report.ok}`", f"- counts: `{json.dumps(report.counts or {}, ensure_ascii=False, sort_keys=True)}`", "", "## Errors", ""]
+        lines.extend(f"- `{item['code']}` `{item.get('object_id') or ''}`: {item['message']}" for item in report.errors)
+        if not report.errors:
+            lines.append("- None")
+        lines.extend(["", "## Warnings", ""])
+        lines.extend(f"- `{item['code']}` `{item.get('object_id') or ''}`: {item['message']}" for item in report.warnings)
+        if not report.warnings:
+            lines.append("- None")
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return output_path
+
+
+SECTION_ORDER = (
+    ("项目总契约与禁止事项", {"PROJECT"}),
+    ("世界观与风格宪法", {"RULE"}),
+    ("世界规则、时代、技术或力量上限", {"RULE"}),
+    ("地理、交通、通信、资源与信息网络", {"LOCATION", "RESOURCE"}),
+    ("势力和机构生态", {"FACTION"}),
+    ("全人物总表", {"CHARACTER", "COHORT"}),
+    ("核心与重要人物生平、性格成因和决策模型", {"CHARACTER", "HUMAN_STATE"}),
+    ("人物关系拓扑", {"CHARACTER", "RELATION"}),
+    ("人物弧、高光与命运地图", {"CHARACTER"}),
+    ("N 幕宏观结构", {"ACT"}),
+    ("Dynamic N-Line 总图", {"LINE"}),
+    ("多线碰撞矩阵", {"LINE"}),
+    ("全书剧情梗概", {"EVENT"}),
+    ("全书主因果链", {"EVENT"}),
+    ("伏笔、悬念、揭示和兑现地图", {"PROMISE"}),
+    ("全书时间线", {"EVENT", "TIMEPOINT"}),
+    ("空间、移动、资源和信息流", {"LOCATION", "RESOURCE"}),
+    ("高潮、低谷和规则变化地图", {"CLIMAX"}),
+    ("卷级架构与每卷因果脊柱", {"VOLUME"}),
+    ("全章 Story Nodes", {"EVENT", "BEAT"}),
+    ("指定窗口详细章纲", {"EVENT", "CHAPTER_PLAN"}),
+    ("关键人物、道具、证据、地点和规则来源表", {"CHARACTER", "OBJECT", "PROP", "EVIDENCE", "LOCATION", "RULE"}),
+    ("开放余波与禁止漂移清单", {"LINE", "PROMISE", "RULE"}),
+)
+
+
+def render_packet_markdown(packet: dict, title: str = "VNext Outline", project_id: str = "PROJECT.unknown") -> str:
+    entities = {item["id"]: item for item in packet.get("entities", [])}
+    lines = [f"# {title}", "", f"- project_id: `{project_id}`", "- source: `SQLite Canon`", ""]
+    for label, key in (("假设", "assumptions"), ("开放问题", "open_questions"), ("来源", "source_refs")):
+        values = packet.get(key, [])
+        lines.append(f"- {label}: " + ("；".join(str(value) for value in values) if values else "（无）"))
+    precision = packet.get("precision", {})
+    lines.append(f"- 精度: `{json.dumps(precision, ensure_ascii=False, sort_keys=True)}`")
+    lines.append("")
+    emitted: set[str] = set()
+
+    def payload_summary(item: dict) -> str:
+        payload = item.get("payload", {})
+        kind = str(item.get("kind", "")).upper()
+        fields = {
+            "CHARACTER": ("identity", "biography", "personality", "desires", "goals", "interests", "decision_model", "private_life", "life_constraints", "knowledge_state", "misjudgments", "arc", "highlights", "fate"),
+            "EVENT": ("active_actor", "actor_goal", "action", "choice", "cost", "state_delta", "causal_inputs", "causal_outputs", "time_window", "location", "line_refs"),
+            "LINE": ("owner", "goal", "pressure", "opposing_force", "milestones", "climax_condition", "closure_condition", "status"),
+            "PROMISE": ("creation_event", "maturity_condition", "reveal_window", "payoff_event", "status", "post_payoff_state"),
+            "CHAPTER_PLAN": ("plan_level", "dynamic_beats", "line_clusters", "scene_payloads", "expansion_status", "mid_chapter_load"),
+        }.get(kind, tuple(sorted(payload)))
+        return "; ".join(
+            f"{field}={json.dumps(payload[field], ensure_ascii=False, sort_keys=True)}"
+            for field in fields if field in payload
+        )
+
+    for heading, kinds in SECTION_ORDER:
+        lines.extend([f"# {heading}", ""])
+        selected = [item for item in entities.values() if str(item.get("kind", "")).upper() in kinds and item["id"] not in emitted]
+        roster = heading == "全人物总表"
+        for item in sorted(selected, key=lambda value: value["id"]):
+            if roster and str(item.get("kind", "")).upper() == "COHORT":
+                lines.append(f"- `{item['id']}` **{item.get('name', item['id'])}** [COHORT] — {payload_summary(item)}")
+                emitted.add(item["id"])
+            elif roster and str(item.get("kind", "")).upper() == "CHARACTER":
+                identity = (item.get("payload") or {}).get("identity", "")
+                lines.append(f"- **{item.get('name', item['id'])}** [{identity}]")
+            else:
+                lines.append(f"- `{item['id']}` **{item.get('name', item['id'])}** [{item.get('kind', 'UNKNOWN')}] — {payload_summary(item)}")
+                emitted.add(item["id"])
+        if not selected:
+            matching = [item for item in entities.values() if str(item.get("kind", "")).upper() in kinds]
+            lines.append("- （条目已在前置章节展开）" if matching else "- （本阶段暂无已提交条目）")
+        lines.append("")
+    lines.extend(["# 负事实与禁止漂移", ""])
+    negative_facts = sorted(packet.get("negative_facts", []))
+    if negative_facts:
+        lines.extend(f"- `{fact}`" for fact in negative_facts)
+    else:
+        lines.append("- （暂无负事实）")
+    lines.append("")
+    lines.extend(["# 关系与因果边", ""])
+    names = {item_id: item.get("name", item_id) for item_id, item in entities.items()}
+    for edge in sorted(packet.get("edges", []), key=lambda value: value["id"]):
+        lines.append(f"- `{edge['id']}` `{edge.get('type', 'RELATED_TO')}`: **{names.get(edge.get('source'), edge.get('source'))}** → **{names.get(edge.get('target'), edge.get('target'))}** — {json.dumps(edge.get('payload', {}), ensure_ascii=False, sort_keys=True)}")
+    if not packet.get("edges"):
+        lines.append("- （暂无关系边）")
+    return "\n".join(lines) + "\n"
+
+
+def _cypher_literal(value: Any) -> str:
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    if isinstance(value, list):
+        return "[" + ", ".join(_cypher_literal(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{key}: {_cypher_literal(item)}" for key, item in value.items()) + "}"
+    raise TypeError(f"unsupported Cypher parameter type: {type(value)!r}")
+
+
+class GraphProjector:
+    QUERY_TEXTS = {
+        "character_neighborhood": (
+            "MATCH (a:Entity {id: $anchor_id, project_id: $project_id})-[r:REL*1..2]-(n:Entity {project_id: $project_id}) "
+            "WHERE all(x IN r WHERE x.project_id = $project_id) "
+            "RETURN a.id AS anchor_id, n.id AS node_id, "
+            "[x IN r | {type:x.type, edge_id:x.edge_id}] AS path"
+        ),
+        "causal_path": (
+            "MATCH p=(a:Entity {id:$from_id, project_id:$project_id})-[:REL*1..8]->(b:Entity {id:$to_id, project_id:$project_id}) "
+            "WHERE all(x IN relationships(p) WHERE x.project_id = $project_id AND x.type IN "
+            "['CAUSES', 'ENABLES', 'BLOCKS', 'REQUIRES']) "
+            "RETURN [x IN nodes(p) | x.id] AS node_ids"
+        ),
+        "hyperedge_context": (
+            "MATCH (e:Entity {kind:'EVENT', id:$event_id, project_id:$project_id})<-[r:REL {type:'PARTICIPATES_IN', project_id:$project_id}]-(p:Entity {project_id:$project_id}) "
+            "RETURN e.id AS event_id, collect({id:p.id, role:r.role, kind:p.kind}) AS participants"
+        ),
+    }
+
+    def __init__(self, shell: str = "cypher-shell", database: str = "neo4j", timeout_seconds: float = 15.0):
+        self.shell = shell
+        self.database = database
+        self.timeout_seconds = timeout_seconds
+        self.graph_dir = Path(__file__).resolve().parents[1] / "graph"
+
+    def _resolved_shell(self) -> str:
+        resolved = shutil.which(self.shell)
+        if resolved:
+            return resolved
+        if Path(self.shell).is_file():
+            return self.shell
+        raise ValidationError("cypher-shell was not found", "NEO4J_SHELL_NOT_FOUND")
+
+    def _run(self, cypher: str, params: dict | None = None) -> str:
+        shell = self._resolved_shell()
+        username = os.environ.get("NEO4J_USERNAME", os.environ.get("NEO4J_USER"))
+        password = os.environ.get("NEO4J_PASSWORD")
+        if not username or not password:
+            raise ValidationError(
+                "NEO4J_USERNAME/NEO4J_PASSWORD are required for graph operations",
+                "NEO4J_CONFIG_MISSING",
+            )
+        address = os.environ.get("NEO4J_URI", os.environ.get("NEO4J_ADDRESS", "neo4j://localhost:7687"))
+        parsed_address = urlparse(address)
+        if parsed_address.hostname not in {"localhost", "127.0.0.1", "::1"} and os.environ.get("NEO4J_ALLOW_REMOTE") != "1":
+            raise ValidationError("remote Neo4j endpoints are disabled; set NEO4J_ALLOW_REMOTE=1 explicitly", "NEO4J_REMOTE_BLOCKED")
+        command = [
+            shell, "--non-interactive", "--format", "plain", "-a", address,
+            "-u", username, "-d", self.database,
+        ]
+        if params:
+            command.extend(["-P", _cypher_literal(params)])
+        try:
+            result = subprocess.run(
+                command,
+                input=cypher,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=self.timeout_seconds,
+                env={**os.environ, "NEO4J_PASSWORD": password},
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ValidationError(
+                f"Neo4j command exceeded {self.timeout_seconds:g}s", "NEO4J_TIMEOUT"
+            ) from error
+        if result.returncode:
+            raise ValidationError(
+                result.stderr.strip() or "Neo4j query failed", "NEO4J_QUERY_FAILED"
+            )
+        return result.stdout
+
+    def ensure_schema(self) -> None:
+        schema = (self.graph_dir / "constraints.cypher").read_text(encoding="utf-8")
+        self._run(schema)
+
+    def query_text(self, script_name: str) -> str:
+        if script_name not in self.QUERY_TEXTS:
+            raise ValidationError(f"query is not allowlisted: {script_name}", "QUERY_NOT_ALLOWED")
+        return self.QUERY_TEXTS[script_name]
+
+    def sync(self, project_id: str, changes: list[dict]) -> ProjectionResult:
+        if not changes:
+            return ProjectionResult(0, [])
+        entities: list[dict] = []
+        edges: list[dict] = []
+        delete_entities: list[dict] = []
+        delete_edges: list[dict] = []
+        versions = []
+        for change in changes:
+            after = change.get("after_json")
+            if isinstance(after, str):
+                after = json.loads(after)
+            before = change.get("before_json")
+            if isinstance(before, str):
+                before = json.loads(before)
+            if change.get("action") == "DELETE":
+                target = before or {"entity_id": change.get("object_id"), "edge_id": change.get("object_id")}
+                if change.get("object_type") == "ENTITY":
+                    delete_entities.append({"id": target.get("entity_id", change.get("object_id"))})
+                elif change.get("object_type") == "EDGE":
+                    delete_edges.append({"id": target.get("edge_id", change.get("object_id"))})
+                versions.append(int(change.get("version", 0)))
+                continue
+            if change.get("object_type") == "ENTITY":
+                payload = json.loads(after.get("payload_json", "{}"))
+                entities.append({
+                    "id": after["entity_id"],
+                    "kind": after["kind"],
+                    "props": {
+                        "project_id": project_id, "kind": after["kind"], "name": after["name"],
+                        "namespace": after["namespace"], "status": after["status"],
+                        "payload": _canonical_json(payload),
+                    },
+                })
+            elif change.get("object_type") == "EDGE":
+                payload = json.loads(after.get("payload_json", "{}"))
+                edges.append({
+                    "id": after["edge_id"], "type": after["edge_type"],
+                    "source": after["source_id"], "target": after["target_id"],
+                    "props": {
+                        "project_id": project_id, "type": after["edge_type"],
+                        "namespace": after["namespace"], "status": after["status"], **payload,
+                    },
+                })
+            versions.append(int(change.get("version", 0)))
+        cypher = (self.graph_dir / "projection.cypher").read_text(encoding="utf-8")
+        self.ensure_schema()
+        self._run(cypher, {
+            "project_id": project_id,
+            "canon_version": max(versions or [0]),
+            "entities": entities,
+            "edges": edges,
+            "delete_entities": delete_entities,
+            "delete_edges": delete_edges,
+        })
+        return ProjectionResult(len(changes), [])
+
+    def rebuild(self, project_id: str, changes: list[dict]) -> ProjectionResult:
+        self.ensure_schema()
+        self._run(
+            "MATCH (n:Entity {project_id:$project_id}) DETACH DELETE n",
+            {"project_id": project_id},
+        )
+        return self.sync(project_id, changes)
+
+    def query(self, script_name: str, params: dict) -> list[dict]:
+        query_params = dict(params)
+        if "anchor_ids" in query_params:
+            anchor_ids = query_params.pop("anchor_ids")
+            if not isinstance(anchor_ids, list) or not anchor_ids:
+                raise ValidationError("anchor_ids must be a non-empty list", "INVALID_QUERY_PARAMS")
+            query_params["anchor_id"] = anchor_ids[0]
+        output = self._run(self.query_text(script_name), query_params)
+        rows = list(csv.reader(io.StringIO(output), delimiter="\t"))
+        if not rows:
+            return []
+        headers = rows[0]
+        return [dict(zip(headers, row)) for row in rows[1:] if row]
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="VNext long-form outline runtime")
+    subparsers = parser.add_subparsers(dest="command")
+    init = subparsers.add_parser("init")
+    init.add_argument("--db", required=True)
+    init.add_argument("--project-id", required=True)
+    init.add_argument("--title", required=True)
+
+    apply = subparsers.add_parser("apply")
+    apply.add_argument("--db", required=True)
+    apply.add_argument("--project-id", required=True)
+    apply.add_argument("--expected-version", required=True, type=int)
+    apply.add_argument("--packet", required=True)
+    apply.add_argument("--message", required=True)
+
+    context = subparsers.add_parser("context")
+    context.add_argument("--db", required=True)
+    context.add_argument("--project-id", required=True)
+    context.add_argument("--anchor", action="append", required=True)
+    context.add_argument("--max-hops", type=int, default=2)
+    context.add_argument("--source", choices=("sqlite", "neo4j", "auto"), default="auto")
+
+    audit = subparsers.add_parser("audit")
+    audit.add_argument("--db")
+    audit.add_argument("--project-id")
+    audit.add_argument("--packet")
+
+    sync = subparsers.add_parser("graph-sync")
+    sync.add_argument("--db", required=True)
+    sync.add_argument("--project-id", required=True)
+
+    rebuild = subparsers.add_parser("graph-rebuild")
+    rebuild.add_argument("--db", required=True)
+    rebuild.add_argument("--project-id", required=True)
+
+    export = subparsers.add_parser("export")
+    export.add_argument("--db", required=True)
+    export.add_argument("--project-id", required=True)
+    export.add_argument("--out", required=True)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if not args.command:
+        parser.print_help()
+        return 0
+    try:
+        if args.command == "init":
+            version = CanonicalStore(Path(args.db)).init_project(args.project_id, args.title)
+            print(json.dumps({"project_id": args.project_id, "version": version}, ensure_ascii=False))
+            return 0
+        if args.command == "audit":
+            if args.packet:
+                packet = json.loads(Path(args.packet).read_text(encoding="utf-8"))
+            elif args.db and args.project_id:
+                store = CanonicalStore(Path(args.db))
+                _, packet = store._load_packet(args.project_id)
+            else:
+                raise ValidationError("audit needs --packet or --db plus --project-id", "INVALID_AUDIT_ARGS")
+            report = audit_packet(packet)
+            if args.db and args.project_id:
+                _append_graph_health(report, store.pending_changes(args.project_id), args.project_id)
+            print(json.dumps(report.as_dict(), ensure_ascii=False))
+            return 0 if report.ok else 2
+
+        store = CanonicalStore(Path(args.db))
+        if args.command == "apply":
+            packet = json.loads(Path(args.packet).read_text(encoding="utf-8"))
+            result = store.apply_packet(args.project_id, packet, args.expected_version, args.message)
+            print(json.dumps({"project_id": result.project_id, "version": result.version, "snapshot_hash": result.snapshot_hash, "outbox_count": result.outbox_count}, ensure_ascii=False))
+            return 0
+        if args.command == "context":
+            _, packet = store._load_packet(args.project_id)
+            print(json.dumps(build_context_with_graph(packet, args.project_id, args.anchor, args.max_hops, args.source), ensure_ascii=False))
+            return 0
+        if args.command == "graph-sync":
+            changes = store.pending_changes(args.project_id)
+            projector = GraphProjector()
+            try:
+                result = projector.sync(args.project_id, changes)
+            except ValidationError as error:
+                ids = [int(change["change_id"]) for change in changes]
+                store.mark_projection(ids, "DEGRADED", str(error))
+                raise
+            store.mark_projection([int(change["change_id"]) for change in changes], "APPLIED")
+            print(json.dumps({"applied": result.applied, "degraded": result.degraded}, ensure_ascii=False))
+            return 0
+        if args.command == "graph-rebuild":
+            count = store.rebuild_changes(args.project_id)
+            changes = store.pending_changes(args.project_id)
+            projector = GraphProjector()
+            try:
+                result = projector.rebuild(args.project_id, changes)
+            except ValidationError as error:
+                ids = [int(change["change_id"]) for change in changes]
+                store.mark_projection(ids, "DEGRADED", str(error))
+                raise
+            store.mark_projection([int(change["change_id"]) for change in changes], "APPLIED")
+            print(json.dumps({"queued": count, "applied": result.applied, "degraded": result.degraded}, ensure_ascii=False))
+            return 0
+        if args.command == "export":
+            store.export_markdown(args.project_id, Path(args.out))
+            audit_path = Path(args.out).with_name("audit-report.md")
+            store.export_audit(args.project_id, audit_path)
+            print(json.dumps({"outline": str(args.out), "audit": str(audit_path)}, ensure_ascii=False))
+            return 0
+        raise ValidationError(f"unknown command: {args.command}", "UNKNOWN_COMMAND")
+    except (ValidationError, OSError, json.JSONDecodeError) as error:
+        payload = {"error": getattr(error, "code", "RUNTIME_ERROR"), "message": str(error)}
+        print(json.dumps(payload, ensure_ascii=False))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

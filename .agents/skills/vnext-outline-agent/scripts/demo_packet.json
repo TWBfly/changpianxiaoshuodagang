@@ -1,0 +1,371 @@
+{
+  "entities": [
+    {
+      "id": "CHAR.shenyan",
+      "kind": "CHARACTER",
+      "namespace": "CANON",
+      "name": "沈砚",
+      "payload": {
+        "character_tier": "CORE",
+        "identity": "临河县令",
+        "biography": "寒门出身，曾在漕运案中失去恩师，因此相信账证胜过口供。",
+        "desires": ["保住临河百姓", "证明自己没有被权力驯服"],
+        "goals": ["查清赈粮亏空", "让证据在公堂上成立"],
+        "interests": ["县民生计", "仕途清白", "可持续的司法秩序"],
+        "constraints": ["兵力有限", "上级要求限期结案", "必须遵守官府程序"],
+        "preferred_strategy": "先稳住粮路，再用公开账证迫使对手自证",
+        "personality": "克制、耐心、对失控高度警惕",
+        "decision_model": "先核对可公开证据，再选择能让多数人承担得起的程序",
+        "private_life": "每晚替病母整理药单，害怕县衙失序会让她断药",
+        "life_constraints": ["照料病母", "俸禄有限", "不能私设刑讯"],
+        "knowledge_state": "知道亏空存在，不知道幕后买家和旧令被谁利用",
+        "misjudgments": ["以为只要按程序核账就能避免冲突"],
+        "arc": "从依赖程序的孤立清官，成长为能把程序变成公众协作工具的组织者",
+        "growth_arc": "从依赖程序的孤立清官，成长为能把程序变成公众协作工具的组织者",
+        "highlights": ["封门却放行病粮", "在公堂承认自己误判"],
+        "fate": "保住县城但失去升迁机会，成为地方新秩序的守门人",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "CHAR.guqinghe",
+      "kind": "CHARACTER",
+      "namespace": "CANON",
+      "name": "顾青禾",
+      "payload": {
+        "character_tier": "CORE",
+        "identity": "临河粮商兼船队东家",
+        "biography": "父亲死于一次私运失火，她靠重建船队还清债务，最怕信誉再次被夺走。",
+        "desires": ["保住船队和伙计", "让家人不再受债主控制"],
+        "goals": ["找回被截的赈粮账册", "逼幕后买家留下交易痕迹"],
+        "interests": ["商路安全", "伙计忠诚", "家族名誉"],
+        "constraints": ["账册残页在她手里会招来灭口", "不能公开承认曾改过运单", "需要沈砚的合法文书"],
+        "preferred_strategy": "用商路和人情交换信息，再把风险转嫁给可验证的证据",
+        "personality": "务实、敏锐、对施舍反感",
+        "decision_model": "先保护伙计与家人，再用可验证的交易痕迹换取公开谈判空间",
+        "private_life": "把父亲遗留的船铃放在柜台下，夜里独自核对每笔欠款",
+        "life_constraints": ["船队债务", "伙计家属依赖", "家人住在债主控制的街区"],
+        "knowledge_state": "知道印章异常和船队损失，不知道交易来源",
+        "misjudgments": ["误以为只要护住残页就能护住所有伙计"],
+        "arc": "从只想保住自己的商人，成长为愿意承担公开指证代价的共同体盟友",
+        "growth_arc": "从只想保住自己的商人，成长为愿意承担公开指证代价的共同体盟友",
+        "highlights": ["在封门时主动交出一页假账", "拒绝用伙计顶罪"],
+        "fate": "船队被拆分监管，但成为新粮运制度的民间监督者",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "CHAR.lujingshan",
+      "kind": "CHARACTER",
+      "namespace": "CANON",
+      "name": "鲁敬山",
+      "payload": {
+        "character_tier": "MAJOR",
+        "identity": "巡粮御史、幕后买家的代理人",
+        "biography": "从军需文书起家，曾因一次饥荒失控被军法问责，后来把控制信息当成安全感来源。",
+        "desires": ["维持上级对他的信任", "让所有人相信短缺是天灾"],
+        "goals": ["夺回账册残页", "把亏空归罪于顾青禾"],
+        "interests": ["官位", "秘密交易不曝光", "对地方官的控制"],
+        "constraints": ["不能亲自接触账册", "上级需要一个可公开处置的替罪羊", "必须保留赈粮表面流动"],
+        "preferred_strategy": "用行政时限制造恐慌，以程序压力迫使他人互相指认",
+        "personality": "冷静、控制欲强、擅长把恐惧包装成秩序",
+        "decision_model": "把信息切成可控份额，让每个下属只看到足以服从的一段真相",
+        "private_life": "独居驿馆，按军令格式收存旧案，不允许任何人碰他的私印",
+        "life_constraints": ["上级考核", "旧案问责阴影", "交易伙伴互不信任"],
+        "knowledge_state": "知道交易链的执行端，不知道上级最终买家",
+        "misjudgments": ["误以为切碎信息就能切断责任"],
+        "arc": "拒绝承认结构性责任，最终被自己留下的程序证据锁定",
+        "growth_arc": "拒绝承认结构性责任，最终被自己留下的程序证据锁定",
+        "highlights": ["把查粮期限提前三日", "在公堂上主动引用一条会反噬自己的旧令"],
+        "fate": "被押送京城审理，私人交易网随账册公开而瓦解",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "LOC.south_gate",
+      "kind": "LOCATION",
+      "namespace": "CANON",
+      "name": "南城门",
+      "payload": {
+        "controller": "县衙",
+        "access_conditions": ["夜间需县令手令"],
+        "travel_cost": "半日",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "LOC.east_warehouse",
+      "kind": "LOCATION",
+      "namespace": "CANON",
+      "name": "东平码头仓",
+      "payload": {
+        "controller": "顾青禾船队",
+        "access_conditions": ["持船队铜牌或县衙搜查令"],
+        "travel_cost": "一刻钟",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "OBJECT.ledger_fragment",
+      "kind": "OBJECT",
+      "namespace": "CANON",
+      "name": "赈粮账册残页",
+      "payload": {
+        "owner_history": ["鲁敬山代理账房", "顾青禾", "沈砚保管"],
+        "material_constraint": "水浸后只能辨认印章和三行数字",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "EVIDENCE.red_seal",
+      "kind": "EVIDENCE",
+      "namespace": "CANON",
+      "name": "倒置的赤粮司印",
+      "payload": {
+        "meaning": "显示赈粮在入库前已被重新过秤",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "RULE.curfew_order",
+      "kind": "RULE",
+      "namespace": "CANON",
+      "name": "临河县夜间封门令",
+      "payload": {
+        "limit": "日落后无县令手令不得出城",
+        "exception": "病粮和救火物资可由值守医官签字放行",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "ACT.relief_crisis",
+      "kind": "ACT",
+      "namespace": "PLAN",
+      "name": "赈粮危机幕",
+      "payload": {
+        "range": "第1—4卷",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "VOLUME.south_gate",
+      "kind": "VOLUME",
+      "namespace": "PLAN",
+      "name": "南门卷",
+      "payload": {
+        "core_question": "账册残页能否在粮路断裂前成为公共证据",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "LINE.public_investigation",
+      "kind": "LINE",
+      "namespace": "PLAN",
+      "name": "公开查粮线",
+      "payload": {
+        "owner": "CHAR.shenyan",
+        "origin": "封门令与赈粮亏空同时出现",
+        "goal": "让账证进入公堂并保住粮路",
+        "pressure": "上级提前结案期限",
+        "opposing_force": "鲁敬山的程序封锁",
+        "resources": ["县衙文书", "南城门守备"],
+        "information_state": "知道亏空存在但不知道买家",
+        "milestones": ["封门查粮", "公开赤粮司印", "公堂对质"],
+        "reversals": ["沈砚发现自己签发的旧令被利用"],
+        "collisions": ["LINE.merchant_escape"],
+        "climax_condition": "沈砚必须在保仕途和公开证据间选择",
+        "closure_condition": "赈粮亏空归因成立且新监管机制生效",
+        "failure_outcome": "顾青禾被定罪，粮路继续被控制",
+        "residue": "沈砚失去升迁机会",
+        "status": "ACTIVE",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "LINE.merchant_escape",
+      "kind": "LINE",
+      "namespace": "PLAN",
+      "name": "商队自救线",
+      "payload": {
+        "owner": "CHAR.guqinghe",
+        "origin": "顾青禾发现账册残页仍在东平码头",
+        "goal": "护住伙计并把残页交给可信的公堂",
+        "pressure": "鲁敬山派人封锁船队",
+        "opposing_force": "替罪羊叙事和内部恐慌",
+        "resources": ["船队铜牌", "东平码头暗仓"],
+        "information_state": "知道印章异常但不知道其交易来源",
+        "milestones": ["转移残页", "交出假账诱出追兵", "拒绝让伙计顶罪"],
+        "reversals": ["沈砚的封门令既保护她也切断出城路线"],
+        "collisions": ["LINE.public_investigation"],
+        "climax_condition": "顾青禾必须公开承认自己改过一张运单",
+        "closure_condition": "残页与船队证词共同指向鲁敬山",
+        "failure_outcome": "船队解散，伙计成为替罪羊",
+        "residue": "船队被拆分监管",
+        "status": "ACTIVE",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "EVENT.seal_gate",
+      "kind": "EVENT",
+      "namespace": "PLAN",
+      "name": "封门查粮",
+      "payload": {
+        "active_actor": "CHAR.shenyan",
+        "actor_goal": "在不饿死病户的前提下冻结可疑粮车",
+        "causal_inputs": ["RULE.curfew_order", "OBJECT.ledger_fragment"],
+        "action": "沈砚在南城门下令查验粮车，并援引病粮例外放行一车药粮",
+        "counterforce": "鲁敬山提前发来的限时结案公文",
+        "choice": "牺牲官场信用换取半日调查窗口",
+        "cost": "县衙被上级认定为拖延",
+        "state_delta": "顾青禾的出城路线被迫转入东平码头",
+        "causal_outputs": ["EVENT.move_fragment"],
+        "time_index": 1,
+        "time_window": "第一日傍晚",
+        "location": "LOC.south_gate",
+        "line_refs": ["LINE.public_investigation", "LINE.merchant_escape"],
+        "provenance_refs": ["BRIEF.demo"],
+        "reader_question": "沈砚究竟是在查粮，还是在等一个能公开的证据",
+        "requires_hyperedge": true
+      }
+    },
+    {
+      "id": "EVENT.move_fragment",
+      "kind": "EVENT",
+      "namespace": "PLAN",
+      "name": "转移账册残页",
+      "payload": {
+        "active_actor": "CHAR.guqinghe",
+        "actor_goal": "保住伙计并让证据离开封锁区",
+        "causal_inputs": ["EVENT.seal_gate"],
+        "action": "顾青禾把残页藏进药箱，借病粮例外转移到东平码头",
+        "counterforce": "鲁敬山的搜查队封锁正门",
+        "choice": "放弃一船粮，保住唯一证据",
+        "cost": "船队损失当日现银并引发伙计不满",
+        "state_delta": "账册残页进入顾青禾控制的暗仓",
+        "causal_outputs": ["EVENT.public_confrontation"],
+        "time_index": 2,
+        "time_window": "第二日清晨",
+        "location": "LOC.east_warehouse",
+        "line_refs": ["LINE.merchant_escape"],
+        "provenance_refs": ["BRIEF.demo"],
+        "reader_question": "顾青禾会保护证据，还是保护自己的船队",
+        "requires_hyperedge": true
+      }
+    },
+    {
+      "id": "EVENT.public_confrontation",
+      "kind": "EVENT",
+      "namespace": "PLAN",
+      "name": "公堂对质",
+      "payload": {
+        "active_actor": "CHAR.lujingshan",
+        "actor_goal": "把亏空归罪于顾青禾的私改运单",
+        "causal_inputs": ["EVENT.move_fragment", "EVIDENCE.red_seal"],
+        "action": "鲁敬山在公堂先展示运单，再逼顾青禾承认改单",
+        "counterforce": "沈砚要求同时核验赤粮司印",
+        "choice": "鲁敬山引用自己签发的旧令压过现场证词",
+        "cost": "旧令编号被完整记录在案",
+        "state_delta": "替罪羊叙事获得短暂优势，但鲁敬山留下可追溯签批",
+        "causal_outputs": ["EVENT.open_accounts"],
+        "time_index": 3,
+        "time_window": "第三日午后",
+        "location": "LOC.south_gate",
+        "line_refs": ["LINE.public_investigation", "LINE.merchant_escape"],
+        "provenance_refs": ["BRIEF.demo"],
+        "reader_question": "沈砚能否承认自己旧令的责任",
+        "requires_hyperedge": true
+      }
+    },
+    {
+      "id": "EVENT.open_accounts",
+      "kind": "EVENT",
+      "namespace": "PLAN",
+      "name": "公开账证",
+      "payload": {
+        "active_actor": "CHAR.shenyan",
+        "actor_goal": "让残页、印章和旧令在同一份公案中互相验证",
+        "causal_inputs": ["EVENT.public_confrontation"],
+        "action": "沈砚承认旧令责任，公开残页并要求按印章批次复核入库记录",
+        "counterforce": "鲁敬山要求先行押走顾青禾",
+        "choice": "沈砚放弃升迁机会，选择把调查权限交给三方见证",
+        "cost": "县令职位被暂缓复核，县衙失去独断权",
+        "state_delta": "账证闭环成立，地方粮运改为三方留痕",
+        "causal_outputs": ["PROMISE.relief_truth", "CLIMAX.public_record"],
+        "time_index": 4,
+        "time_window": "第四日清晨",
+        "location": "LOC.south_gate",
+        "line_refs": ["LINE.public_investigation", "LINE.merchant_escape"],
+        "provenance_refs": ["BRIEF.demo"],
+        "reader_question": "公开真相之后，谁来承担秩序成本"
+      }
+    },
+    {
+      "id": "PROMISE.relief_truth",
+      "kind": "PROMISE",
+      "namespace": "PLAN",
+      "name": "赤粮司印的真正含义",
+      "payload": {
+        "creation_event": "EVENT.seal_gate",
+        "carrier": "EVIDENCE.red_seal",
+        "who_knows": ["CHAR.guqinghe"],
+        "who_misunderstands": ["CHAR.shenyan", "CHAR.lujingshan"],
+        "reinforcement_events": ["EVENT.move_fragment", "EVENT.public_confrontation"],
+        "choices_affected": ["EVENT.open_accounts"],
+        "maturity_condition": "残页数字、印章批次和旧令编号在同一张证词中出现",
+        "reveal_window": "第四日公堂",
+        "payoff_event": "EVENT.open_accounts",
+        "post_payoff_state": "赈粮亏空可追溯到鲁敬山代理账房",
+        "status": "PAID_OFF",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    },
+    {
+      "id": "CLIMAX.public_record",
+      "kind": "CLIMAX",
+      "namespace": "PLAN",
+      "name": "三方留痕公案",
+      "payload": {
+        "trigger": "沈砚公开承认旧令责任",
+        "irreversible_change": "县衙、船队和粮司共同留痕",
+        "provenance_refs": ["BRIEF.demo"]
+      }
+    }
+  ],
+  "edges": [
+    {"id": "EDGE.p1", "type": "PARTICIPATES_IN", "source": "CHAR.shenyan", "target": "EVENT.seal_gate", "namespace": "PLAN", "payload": {"role": "initiator"}},
+    {"id": "EDGE.p2", "type": "PARTICIPATES_IN", "source": "CHAR.guqinghe", "target": "EVENT.seal_gate", "namespace": "PLAN", "payload": {"role": "target"}},
+    {"id": "EDGE.p3", "type": "PARTICIPATES_IN", "source": "OBJECT.ledger_fragment", "target": "EVENT.seal_gate", "namespace": "PLAN", "payload": {"role": "evidence"}},
+    {"id": "EDGE.p4", "type": "PARTICIPATES_IN", "source": "LOC.south_gate", "target": "EVENT.seal_gate", "namespace": "PLAN", "payload": {"role": "location"}},
+    {"id": "EDGE.p5", "type": "PARTICIPATES_IN", "source": "CHAR.guqinghe", "target": "EVENT.move_fragment", "namespace": "PLAN", "payload": {"role": "initiator"}},
+    {"id": "EDGE.p6", "type": "PARTICIPATES_IN", "source": "OBJECT.ledger_fragment", "target": "EVENT.move_fragment", "namespace": "PLAN", "payload": {"role": "evidence"}},
+    {"id": "EDGE.p7", "type": "PARTICIPATES_IN", "source": "LOC.east_warehouse", "target": "EVENT.move_fragment", "namespace": "PLAN", "payload": {"role": "location"}},
+    {"id": "EDGE.p8", "type": "PARTICIPATES_IN", "source": "CHAR.lujingshan", "target": "EVENT.public_confrontation", "namespace": "PLAN", "payload": {"role": "initiator"}},
+    {"id": "EDGE.p9", "type": "PARTICIPATES_IN", "source": "CHAR.guqinghe", "target": "EVENT.public_confrontation", "namespace": "PLAN", "payload": {"role": "target"}},
+    {"id": "EDGE.p10", "type": "PARTICIPATES_IN", "source": "EVIDENCE.red_seal", "target": "EVENT.public_confrontation", "namespace": "PLAN", "payload": {"role": "evidence"}},
+    {"id": "EDGE.p11", "type": "PARTICIPATES_IN", "source": "CHAR.shenyan", "target": "EVENT.open_accounts", "namespace": "PLAN", "payload": {"role": "initiator"}},
+    {"id": "EDGE.p12", "type": "PARTICIPATES_IN", "source": "CHAR.lujingshan", "target": "EVENT.open_accounts", "namespace": "PLAN", "payload": {"role": "target"}},
+    {"id": "EDGE.p13", "type": "PARTICIPATES_IN", "source": "OBJECT.ledger_fragment", "target": "EVENT.open_accounts", "namespace": "PLAN", "payload": {"role": "evidence"}},
+    {"id": "EDGE.p14", "type": "PARTICIPATES_IN", "source": "LOC.south_gate", "target": "EVENT.open_accounts", "namespace": "PLAN", "payload": {"role": "location"}},
+    {"id": "EDGE.c1", "type": "CAUSES", "source": "EVENT.seal_gate", "target": "EVENT.move_fragment", "namespace": "PLAN", "payload": {"reason": "封门迫使转移"}},
+    {"id": "EDGE.c2", "type": "CAUSES", "source": "EVENT.move_fragment", "target": "EVENT.public_confrontation", "namespace": "PLAN", "payload": {"reason": "残页进入公案"}},
+    {"id": "EDGE.c3", "type": "CAUSES", "source": "EVENT.public_confrontation", "target": "EVENT.open_accounts", "namespace": "PLAN", "payload": {"reason": "旧令编号可追溯"}},
+    {"id": "EDGE.t1", "type": "PRECEDES", "source": "EVENT.seal_gate", "target": "EVENT.move_fragment", "namespace": "PLAN", "payload": {}},
+    {"id": "EDGE.t2", "type": "PRECEDES", "source": "EVENT.move_fragment", "target": "EVENT.public_confrontation", "namespace": "PLAN", "payload": {}},
+    {"id": "EDGE.t3", "type": "PRECEDES", "source": "EVENT.public_confrontation", "target": "EVENT.open_accounts", "namespace": "PLAN", "payload": {}},
+    {"id": "EDGE.r1", "type": "OPPOSES", "source": "CHAR.shenyan", "target": "CHAR.lujingshan", "namespace": "CANON", "payload": {"asymmetry": "沈砚求公开证据，鲁敬山求控制叙事"}},
+    {"id": "EDGE.r2", "type": "TRANSACTS_WITH", "source": "CHAR.guqinghe", "target": "CHAR.shenyan", "namespace": "CANON", "payload": {"exchange": "证据换合法文书"}},
+    {"id": "EDGE.l1", "type": "OWNS_LINE", "source": "CHAR.shenyan", "target": "LINE.public_investigation", "namespace": "PLAN", "payload": {}},
+    {"id": "EDGE.l2", "type": "OWNS_LINE", "source": "CHAR.guqinghe", "target": "LINE.merchant_escape", "namespace": "PLAN", "payload": {}},
+    {"id": "EDGE.l3", "type": "COLLIDES_WITH", "source": "LINE.public_investigation", "target": "LINE.merchant_escape", "namespace": "PLAN", "payload": {"shared_resource": "OBJECT.ledger_fragment"}},
+    {"id": "EDGE.pays", "type": "PAYS_OFF", "source": "EVENT.open_accounts", "target": "PROMISE.relief_truth", "namespace": "PLAN", "payload": {}},
+    {"id": "EDGE.climax", "type": "REALIZES", "source": "EVENT.open_accounts", "target": "CLIMAX.public_record", "namespace": "PLAN", "payload": {}},
+    {"id": "EDGE.v1", "type": "BELONGS_TO", "source": "EVENT.seal_gate", "target": "VOLUME.south_gate", "namespace": "PLAN", "payload": {}},
+    {"id": "EDGE.v2", "type": "BELONGS_TO", "source": "EVENT.open_accounts", "target": "ACT.relief_crisis", "namespace": "PLAN", "payload": {}}
+  ],
+  "negative_facts": [
+    "没有无来源的第七名关键人物",
+    "鲁敬山没有亲自接触账册残页",
+    "夜间封门令不能覆盖病粮例外"
+  ]
+}
