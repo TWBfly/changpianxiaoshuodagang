@@ -330,6 +330,152 @@
         "irreversible_change": "县衙、船队和粮司共同留痕",
         "provenance_refs": ["BRIEF.demo"]
       }
+    },
+    {
+      "id": "CHAPTER.1",
+      "kind": "CHAPTER_PLAN",
+      "namespace": "PLAN",
+      "name": "第一章《南门封粮》",
+      "payload": {
+        "chapter_no": 1,
+        "volume_ref": "VOLUME.south_gate",
+        "target_prose_contract": {
+          "unit": "CHINESE_PROSE_CHARACTERS",
+          "target_min": 4000,
+          "target_default": 5000,
+          "target_max": 6000,
+          "chapter_mode": "STANDARD_LONG"
+        },
+        "chapter_function": "让沈砚第一次用程序换取调查窗口，同时切断顾青禾的安全退路",
+        "core_delta": "封门令生效，账册残页进入转移路线，沈砚失去上级信任",
+        "conflict_contract": {
+          "actor_a": "沈砚要冻结可疑粮车并保住病粮通道",
+          "actor_b": "鲁敬山要用限期结案压缩调查空间",
+          "concrete_incompatibility": "既要冻结证据又要保住全部粮路在当前权限下不能同时成立",
+          "conflict_medium": "封门令、病粮例外和限期公文"
+        },
+        "dynamic_beats": [
+          {
+            "beat_id": "BEAT.1",
+            "beat_role": "ACTION",
+            "cause_from_previous": "赈粮亏空与夜间封门令同时出现",
+            "active_actor": "CHAR.shenyan",
+            "actor_goal_before": "在不饿死病户的前提下冻结粮车",
+            "action": "沈砚在南城门下令查验粮车，并公开援引病粮例外",
+            "counterforce": "鲁敬山的限期结案公文先一步抵达",
+            "what_becomes_impossible_or_more_expensive": "继续按旧程序核账会失去半日窗口",
+            "new_information_or_choice": "沈砚发现病粮例外能成为合法缺口",
+            "delta": {"goal": "调查窗口暂时打开", "authority": "上级信任下降"},
+            "actor_goal_after": "用病粮例外换取查验时间",
+            "next_pressure_created": "顾青禾的出城路线被迫改变",
+            "stageability": "STAGEABLE_CORE"
+          },
+          {
+            "beat_id": "BEAT.2",
+            "beat_role": "COUNTERMOVE",
+            "cause_from_previous": "沈砚公开援引病粮例外",
+            "active_actor": "CHAR.lujingshan",
+            "actor_goal_before": "把查粮压缩成程序拖延",
+            "action": "鲁敬山提前派人封住正门并要求立即交出账册",
+            "counterforce": "沈砚把查验记录当众交给三名见证人",
+            "what_becomes_impossible_or_more_expensive": "鲁敬山无法无痕撤回限期命令",
+            "new_information_or_choice": "封锁本身成为未来追查的程序证据",
+            "delta": {"risk": "冲突公开化", "knowledge": "沈砚确认对手在控制信息"},
+            "actor_goal_after": "先夺回账册再切断见证人",
+            "next_pressure_created": "顾青禾必须在粮和证据之间选择",
+            "stageability": "STAGEABLE_CORE"
+          },
+          {
+            "beat_id": "BEAT.3",
+            "beat_role": "REPLAN",
+            "cause_from_previous": "正门封锁使原定出城路线失效",
+            "active_actor": "CHAR.guqinghe",
+            "actor_goal_before": "保住船队和账册残页",
+            "action": "顾青禾把残页藏进药箱，改走东平码头",
+            "counterforce": "放弃一船粮才能避开搜查",
+            "what_becomes_impossible_or_more_expensive": "保住现银与保住证据不再能同时成立",
+            "new_information_or_choice": "她意识到沈砚的封门令既保护她又困住她",
+            "delta": {"resource": "损失一船粮", "available_path": "转入暗仓"},
+            "actor_goal_after": "牺牲现银换取证据存活",
+            "next_pressure_created": "伙计开始怀疑她在拿船队冒险",
+            "stageability": "STAGEABLE_CORE"
+          },
+          {
+            "beat_id": "BEAT.4",
+            "beat_role": "COST",
+            "cause_from_previous": "残页已进入东平码头暗仓",
+            "active_actor": "CHAR.guqinghe",
+            "actor_goal_before": "让证据留在自己控制范围",
+            "action": "顾青禾主动交出一页假账，引导搜查队追错方向",
+            "counterforce": "鲁敬山借假账制造她私改运单的口实",
+            "what_becomes_impossible_or_more_expensive": "她无法继续否认自己改过运单",
+            "new_information_or_choice": "假账把追兵引开，也留下可追溯的交易痕迹",
+            "delta": {"relationship": "与伙计的信任受损", "evidence": "获得一条反向证据"},
+            "actor_goal_after": "用公开承认小错保护更大的证据",
+            "next_pressure_created": "公堂对质将同时审查残页和改单行为",
+            "stageability": "STAGEABLE_CORE"
+          }
+        ],
+        "payload_clusters": [
+          {
+            "cluster_id": "CLUSTER.chapter1.a",
+            "local_goal": "沈砚试图合法打开调查窗口",
+            "active_actors": ["CHAR.shenyan", "CHAR.lujingshan"],
+            "conflict_medium": "封门令与限期公文",
+            "stageable_beats": ["BEAT.1", "BEAT.2"],
+            "local_turn": "调查记录被公开，双方冲突无法私下收回",
+            "local_cost": "沈砚失去上级信任",
+            "exit_state": "正门封锁，调查窗口短暂打开",
+            "pressure_handed_to_next_cluster": "顾青禾必须改道转移残页"
+          },
+          {
+            "cluster_id": "CLUSTER.chapter1.b",
+            "local_goal": "顾青禾让证据脱离封锁",
+            "active_actors": ["CHAR.guqinghe", "CHAR.lujingshan"],
+            "conflict_medium": "粮船、暗仓和假账",
+            "stageable_beats": ["BEAT.3", "BEAT.4"],
+            "local_turn": "假账保护残页却反过来成为指控材料",
+            "local_cost": "船队现银和伙计信任同时受损",
+            "exit_state": "残页暂时安全，顾青禾被推向公堂",
+            "pressure_handed_to_next_cluster": "公堂必须同时审查证据和她的过错"
+          }
+        ],
+        "scene_payloads": [
+          {
+            "scene_id": "SCENE.chapter1.gate",
+            "entry_state": "亏空存在但证据尚未公开",
+            "active_actor_goal": "沈砚打开查验窗口",
+            "opposing_goal_or_process": "鲁敬山用限期公文制造程序压力",
+            "immediate_stakes": "病粮、官位和证据同时受威胁",
+            "live_actions": ["封门", "查验", "公开记录"],
+            "turn_or_reprice": "程序记录从保护沈砚变成约束双方的证据",
+            "exit_state": "正门封锁，调查窗口打开",
+            "delta_dimensions": ["authority", "risk", "available_path"],
+            "payload_cluster_refs": ["CLUSTER.chapter1.a"]
+          },
+          {
+            "scene_id": "SCENE.chapter1.warehouse",
+            "entry_state": "顾青禾原有出城路线失效",
+            "active_actor_goal": "保住残页和伙计",
+            "opposing_goal_or_process": "搜查队封锁正门并寻找账册",
+            "immediate_stakes": "一船粮、残页和伙计生计只能保住两项",
+            "live_actions": ["改道", "藏证", "投放假账"],
+            "turn_or_reprice": "证据安全换来公开承认改单的代价",
+            "exit_state": "残页暂存暗仓，顾青禾被迫面对公堂",
+            "delta_dimensions": ["resource", "knowledge", "relationship", "risk"],
+            "payload_cluster_refs": ["CLUSTER.chapter1.b"]
+          }
+        ],
+        "explicit_compression": {
+          "process_to_summarize": ["普通赶路", "无阻力复核"],
+          "ledger_not_to_itemize": ["粮船库存流水", "普通费用"],
+          "repeated_consequence_to_collapse": ["同一封锁后果只证明一次"]
+        },
+        "continuation_source": "假账让顾青禾暂时保住残页，却把她推入必须公开承认改单的公堂",
+        "forbidden_drift": ["不得新增决定性证据", "不得让鲁敬山突然亲自接触残页"],
+        "provenance_refs": ["BRIEF.demo"],
+        "plan_level": "PRODUCTION_READY"
+      }
     }
   ],
   "edges": [
@@ -367,5 +513,10 @@
     "没有无来源的第七名关键人物",
     "鲁敬山没有亲自接触账册残页",
     "夜间封门令不能覆盖病粮例外"
-  ]
+  ],
+  "precision": {
+    "full_book_detailed_required": true,
+    "expected_chapters": 1,
+    "target_prose_range": [4000, 6000]
+  }
 }

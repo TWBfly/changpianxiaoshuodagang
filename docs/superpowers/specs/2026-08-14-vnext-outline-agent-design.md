@@ -61,7 +61,7 @@
 4. `SPECULATIVE_CANDIDATE → DEFERRED_EXPERIENCE` 出现在状态转换说明中，但 `DEFERRED_EXPERIENCE` 不在 Memory Unit 的状态枚举里，不能原样实现。
 5. “隔离上下文二次审查”可以降低锚定偏差，但仍是同一模型推断，不能被标成认识论独立证据。
 6. 49A 参数矩阵为正文生产和多步 Rollout 预留了大量调用预算；本项目不写正文，也不调用外部模型，因此不应照搬。
-7. OSD/DPC 的 4000—6000 字正文承载审计、Writer Packet、正文 Reality Extraction、Telemetry、RFR 和正文摩擦编译不属于本次目标。
+7. 原初版本不实现正文 Writer、Telemetry、RFR 和正文摩擦编译；本次修复补入最小的 OSD/DPC 章节结构容量审计，以阻止结果句冒充可扩写章纲。
 8. 原规范同时强调远期滚动规划和全书详细章纲，两者存在张力。本设计用“全书结构完整、远期精度分层、当前窗口可细化”解决。
 
 ### 3.3 收敛结论
@@ -424,7 +424,7 @@ Reader Integrity
 当前用户指定窗口：可进一步生成详细章纲
 ```
 
-不写正文，也不以 4000—6000 字正文容量为本次通过条件。
+不写正文；但用户要求的 4000—6000 字章节大纲必须通过结构化 Dramatic Payload Capacity Audit 才能标记为 `PRODUCTION_READY`。
 
 ### 阶段 9：图投影、整合与审计
 
@@ -557,7 +557,7 @@ Python 可以确定引用、枚举、状态、顺序和图连接是否有效，�
 
 ## 14. 刻意不做
 
-- 不实现正文 Writer、4000—6000 字正文容量审计或正文润色。
+- 不实现正文 Writer 或正文润色；实现章节大纲层面的 4000—6000 字 Dramatic Payload Capacity Audit。
 - 不实现网页界面、后台服务或并行多 Agent。
 - 不实现向量检索、Embedding、Telemetry、读者行为预测或自动学习规则。
 - 不实现 Neo4j GDS/APOC 或原生超图算法；首版以事件节点重化、Cypher 结构查询和可追溯证据为超图能力边界。

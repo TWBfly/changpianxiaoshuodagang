@@ -20,11 +20,11 @@ committed.
 ```json
 {
   "entities": [{"id":"CHAR.a","kind":"CHAR","name":"沈砚",
-    "attributes":{"identity":"县令","desires":["查明粮案"],
+    "payload":{"identity":"县令","desires":["查明粮案"],
       "goals":["阻止灭口"],"interests":["保全辖区"],"constraints":["证据不足"],
       "preferred_strategy":"查账","agency":"主动调查",
-      "biography":"...","growth_arc":"...","fate":"..."},
-    "provenance":[{"source_id":"brief-1","kind":"USER_BRIEF"}]}],
+      "biography":"...","growth_arc":"...","fate":"...",
+      "provenance_refs":["brief-1"]}}],
   "edges": [],
   "negative_facts": ["PROP.burned-ledger"]
 }
@@ -37,6 +37,12 @@ packet or already committed Canon. Packet-level `assumptions`,
 `open_questions`, `source_refs`, `precision`, and `negative_facts` are stored
 alongside the Canon snapshot and round-trip through context/export; they are
 not discarded metadata.
+
+Chapter plans use the same `payload` contract. A `PRODUCTION_READY` plan must
+contain a target prose contract, structured dynamic beats, payload clusters,
+scene payloads, compression rules, continuation source, and forbidden drift.
+The runtime computes capacity from those structures; `FULL`, `PASS`, and
+`anti_self_certification` are never accepted as proof when supplied by a packet.
 
 ## Hypergraph mapping
 

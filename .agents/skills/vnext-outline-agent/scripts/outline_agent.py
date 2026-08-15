@@ -99,10 +99,209 @@ PROVENANCE_KINDS = {
 }
 CAUSAL_EDGE_TYPES = {"CAUSES", "PRECEDES", "RESULTS_IN"}
 PACKET_MODES = {"SNAPSHOT", "PATCH"}
+ALLOWED_NAMESPACES = {"CONTRACT", "CANON", "PLAN"}
+ALLOWED_STATUSES = {
+    "ACTIVE", "PROPOSED", "SUPERSEDED", "INVALIDATED", "QUARANTINED",
+    "CLOSED", "RESOLVED", "PAID_OFF", "HEATING", "COLLIDING",
+    "CLIMAX_READY", "CLOSING", "RESIDUE_ONLY", "DRAFT", "APPROVED",
+}
+CHAPTER_STAGEABILITY = {
+    "STAGEABLE_CORE", "SUPPORTING_STAGEABLE", "SUMMARY_ONLY", "RESULT_ONLY", "LEDGER_ONLY",
+}
+CHAPTER_PLAN_REQUIRED_FIELDS = (
+    "chapter_no", "volume_ref", "target_prose_contract", "chapter_function", "core_delta",
+    "conflict_contract", "dynamic_beats", "payload_clusters", "scene_payloads",
+    "explicit_compression", "continuation_source", "forbidden_drift",
+)
+STAGEABLE_BEAT_REQUIRED_FIELDS = (
+    "cause_from_previous", "active_actor", "action", "counterforce",
+    "new_information_or_choice", "delta", "actor_goal_before", "actor_goal_after",
+    "next_pressure_created",
+)
+CLUSTER_REQUIRED_FIELDS = (
+    "cluster_id", "local_goal", "active_actors", "conflict_medium", "stageable_beats",
+    "local_turn", "local_cost", "exit_state", "pressure_handed_to_next_cluster",
+)
+SCENE_REQUIRED_FIELDS = (
+    "scene_id", "entry_state", "active_actor_goal", "opposing_goal_or_process",
+    "immediate_stakes", "live_actions", "turn_or_reprice", "exit_state",
+    "delta_dimensions", "payload_cluster_refs",
+)
 
 
 def _issue(code: str, message: str, object_id: str | None = None) -> dict:
     return {"code": code, "message": message, "object_id": object_id}
+
+
+def _present(value: Any) -> bool:
+    return value is not None and value != "" and value != [] and value != {}
+
+
+def audit_chapter_capacity(entity: dict) -> dict:
+    """Compute chapter capacity from structured dramatic facts, never self-certification flags."""
+    payload = entity.get("payload") if isinstance(entity, dict) else None
+    failures: list[str] = []
+    if not isinstance(payload, dict):
+        return {
+            "chapter_id": entity.get("id") if isinstance(entity, dict) else None,
+            "target_prose_range": None,
+            "stageable_core_beats": 0,
+            "supporting_stageable_beats": 0,
+            "summary_result_beats_removed": 0,
+            "payload_clusters": 0,
+            "core_scenes": 0,
+            "mid_chapter_load": "FAIL",
+            "writer_core_plot_invention_required": True,
+            "final_capacity": "THIN",
+            "failure_reasons": ["CHAPTER_PAYLOAD_INVALID"],
+        }
+
+    contract = payload.get("target_prose_contract")
+    target_range = None
+    if not isinstance(contract, dict):
+        failures.append("TARGET_PROSE_CONTRACT_MISSING")
+    else:
+        target_min = contract.get("target_min")
+        target_max = contract.get("target_max")
+        if not isinstance(target_min, (int, float)) or not isinstance(target_max, (int, float)) or target_min <= 0 or target_max < target_min:
+            failures.append("TARGET_PROSE_CONTRACT_INVALID")
+        else:
+            target_range = [target_min, target_max]
+
+    beats = payload.get("dynamic_beats")
+    clusters = payload.get("payload_clusters")
+    scenes = payload.get("scene_payloads")
+    if not isinstance(beats, list):
+        beats = []
+        failures.append("DYNAMIC_BEATS_MISSING")
+    if not isinstance(clusters, list):
+        clusters = []
+        failures.append("PAYLOAD_CLUSTERS_MISSING")
+    if not isinstance(scenes, list):
+        scenes = []
+        failures.append("SCENE_PAYLOADS_MISSING")
+
+    stageable = []
+    removed = 0
+    beat_ids: set[str] = set()
+    for index, beat in enumerate(beats):
+        if not isinstance(beat, dict):
+            failures.append(f"BEAT_{index + 1}_INVALID")
+            continue
+        beat_id = beat.get("beat_id")
+        if isinstance(beat_id, str):
+            if beat_id in beat_ids:
+                failures.append("DUPLICATE_BEAT_ID")
+            beat_ids.add(beat_id)
+        stageability = str(beat.get("stageability", "")).upper()
+        if stageability not in CHAPTER_STAGEABILITY:
+            failures.append(f"BEAT_{index + 1}_STAGEABILITY_INVALID")
+            continue
+        if stageability in {"SUMMARY_ONLY", "RESULT_ONLY", "LEDGER_ONLY"}:
+            removed += 1
+            continue
+        missing = [field for field in STAGEABLE_BEAT_REQUIRED_FIELDS if not _present(beat.get(field))]
+        if missing:
+            failures.append(f"BEAT_{index + 1}_FIELDS_MISSING:{','.join(missing)}")
+        stageable.append(beat)
+
+    core_beats = [beat for beat in stageable if str(beat.get("stageability", "")).upper() == "STAGEABLE_CORE"]
+    supporting_beats = [beat for beat in stageable if str(beat.get("stageability", "")).upper() == "SUPPORTING_STAGEABLE"]
+
+    cluster_ids: set[str] = set()
+    for index, cluster in enumerate(clusters):
+        if not isinstance(cluster, dict):
+            failures.append(f"CLUSTER_{index + 1}_INVALID")
+            continue
+        missing = [field for field in CLUSTER_REQUIRED_FIELDS if not _present(cluster.get(field))]
+        if missing:
+            failures.append(f"CLUSTER_{index + 1}_FIELDS_MISSING:{','.join(missing)}")
+        cluster_id = cluster.get("cluster_id")
+        if isinstance(cluster_id, str):
+            if cluster_id in cluster_ids:
+                failures.append("DUPLICATE_CLUSTER_ID")
+            cluster_ids.add(cluster_id)
+        refs = cluster.get("stageable_beats")
+        if isinstance(refs, list) and any(ref not in beat_ids for ref in refs):
+            failures.append(f"CLUSTER_{index + 1}_BEAT_REFERENCE_BROKEN")
+
+    for index, scene in enumerate(scenes):
+        if not isinstance(scene, dict):
+            failures.append(f"SCENE_{index + 1}_INVALID")
+            continue
+        missing = [field for field in SCENE_REQUIRED_FIELDS if not _present(scene.get(field))]
+        if missing:
+            failures.append(f"SCENE_{index + 1}_FIELDS_MISSING:{','.join(missing)}")
+        refs = scene.get("payload_cluster_refs")
+        if isinstance(refs, list) and any(ref not in cluster_ids for ref in refs):
+            failures.append(f"SCENE_{index + 1}_CLUSTER_REFERENCE_BROKEN")
+
+    mode = str((contract or {}).get("chapter_mode", "STANDARD_LONG")).upper() if isinstance(contract, dict) else "STANDARD_LONG"
+    if mode in {"STANDARD_LONG", "MAJOR_LONG", "QUIET_LONG"}:
+        if len(core_beats) < 4:
+            failures.append("STAGEABLE_CORE_BEAT_SHORTFALL")
+        if len(clusters) < 2:
+            failures.append("PAYLOAD_CLUSTER_SHORTFALL")
+        if len(scenes) < 2:
+            failures.append("CORE_SCENE_SHORTFALL")
+
+    roles = {str(beat.get("beat_role", "")).upper() for beat in core_beats}
+    middle_roles = {"ACTION", "COUNTERMOVE", "REPLAN", "COST"}
+    missing_middle_roles = sorted(middle_roles - roles)
+    if missing_middle_roles:
+        failures.append("MID_CHAPTER_LOAD_FAILED")
+
+    return {
+        "chapter_id": entity.get("id"),
+        "target_prose_range": target_range,
+        "stageable_core_beats": len(core_beats),
+        "supporting_stageable_beats": len(supporting_beats),
+        "summary_result_beats_removed": removed,
+        "payload_clusters": len(clusters),
+        "core_scenes": len(scenes),
+        "mid_chapter_load": "PASS" if not missing_middle_roles else "FAIL",
+        "missing_middle_roles": missing_middle_roles,
+        "writer_core_plot_invention_required": bool(failures),
+        "final_capacity": "FULL" if not failures else "THIN",
+        "failure_reasons": sorted(set(failures)),
+    }
+
+
+def audit_chapter_set(packet: dict) -> list[dict]:
+    """Check whole-book chapter coverage only when the packet explicitly requests it."""
+    precision = packet.get("precision") if isinstance(packet, dict) else {}
+    if not isinstance(precision, dict) or precision.get("full_book_detailed_required") is not True:
+        return []
+    plans = [
+        entity for entity in packet.get("entities", [])
+        if isinstance(entity, dict) and str(entity.get("kind", "")).upper() == "CHAPTER_PLAN"
+    ]
+    if not plans:
+        return [_issue("CHAPTER_PLAN_MISSING", "full-book detailed mode requires at least one ChapterPlan")]
+    errors: list[dict] = []
+    numbers: list[int] = []
+    for entity in plans:
+        if str((entity.get("payload") or {}).get("plan_level", "STORY_NODE")).upper() != "PRODUCTION_READY":
+            errors.append(_issue("CHAPTER_NOT_PRODUCTION_READY", "full-book detailed mode requires PRODUCTION_READY chapters", entity.get("id")))
+        number = (entity.get("payload") or {}).get("chapter_no")
+        if not isinstance(number, int) or number < 1:
+            errors.append(_issue("INVALID_CHAPTER_NUMBER", "chapter_no must be a positive integer", entity.get("id")))
+        else:
+            numbers.append(number)
+    if len(numbers) != len(set(numbers)):
+        errors.append(_issue("DUPLICATE_CHAPTER_NUMBER", "chapter_no must be unique"))
+    expected = precision.get("expected_chapters")
+    if expected is not None and (not isinstance(expected, int) or expected < 1):
+        errors.append(_issue("INVALID_EXPECTED_CHAPTERS", "expected_chapters must be a positive integer"))
+    elif numbers:
+        target = expected if isinstance(expected, int) else max(numbers)
+        required = set(range(1, target + 1))
+        actual = set(numbers)
+        for number in sorted(required - actual):
+            errors.append(_issue("CHAPTER_PLAN_MISSING", f"chapter {number} has no ChapterPlan"))
+        for number in sorted(actual - required):
+            errors.append(_issue("CHAPTER_NUMBER_OUT_OF_RANGE", f"chapter {number} exceeds expected chapter count"))
+    return errors
 
 
 def audit_packet(packet: dict) -> AuditReport:
@@ -151,6 +350,12 @@ def audit_packet(packet: dict) -> AuditReport:
         entity_map[entity_id] = entity
         kind = str(entity.get("kind", "UNKNOWN")).upper()
         name = str(entity.get("name", ""))
+        namespace = str(entity.get("namespace", "PLAN")).upper()
+        status = str(entity.get("status", "ACTIVE")).upper()
+        if namespace not in ALLOWED_NAMESPACES:
+            errors.append(_issue("INVALID_NAMESPACE", "namespace must be CONTRACT, CANON, or PLAN", entity_id))
+        if status not in ALLOWED_STATUSES:
+            errors.append(_issue("INVALID_STATUS", "status is not a recognized Canon status", entity_id))
         payload = entity.get("payload")
         if not isinstance(payload, dict):
             errors.append(_issue("INVALID_PAYLOAD", "entity payload must be an object", entity_id))
@@ -185,6 +390,14 @@ def audit_packet(packet: dict) -> AuditReport:
             errors.append(_issue("DUPLICATE_ID", "duplicate edge id", edge_id))
             continue
         edge_map[edge_id] = edge
+        edge_namespace = str(edge.get("namespace", "PLAN")).upper()
+        edge_status = str(edge.get("status", "ACTIVE")).upper()
+        if edge_namespace not in ALLOWED_NAMESPACES:
+            errors.append(_issue("INVALID_NAMESPACE", "namespace must be CONTRACT, CANON, or PLAN", edge_id))
+        if edge_status not in ALLOWED_STATUSES:
+            errors.append(_issue("INVALID_STATUS", "status is not a recognized Canon status", edge_id))
+        if not isinstance(edge.get("payload", {}), dict):
+            errors.append(_issue("INVALID_PAYLOAD", "edge payload must be an object", edge_id))
         source, target = edge.get("source"), edge.get("target")
         if source not in entity_map or target not in entity_map:
             errors.append(_issue("BROKEN_REFERENCE", "edge endpoint does not exist", edge_id))
@@ -246,6 +459,8 @@ def audit_packet(packet: dict) -> AuditReport:
                 ]
                 if len(participants) < 2:
                     errors.append(_issue("HYPEREDGE_PARTICIPANT_SHORTFALL", "compound event needs at least two participants", entity_id))
+                if len({edge.get("source") for edge in participants}) < 2:
+                    errors.append(_issue("HYPEREDGE_DUPLICATE_PARTICIPANT", "compound event needs distinct participants", entity_id))
                 roles = {edge.get("payload", {}).get("role") for edge in participants if isinstance(edge.get("payload"), dict)}
                 if "initiator" not in roles:
                     errors.append(_issue("HYPEREDGE_INITIATOR_MISSING", "compound event needs an initiator role", entity_id))
@@ -277,24 +492,26 @@ def audit_packet(packet: dict) -> AuditReport:
                         if ref not in entity_map:
                             errors.append(_issue("BROKEN_REFERENCE", f"promise {field} references an unknown entity", entity_id))
 
-        if kind in {"CHAPTER_PLAN", "BEAT"}:
+        if kind == "CHAPTER_PLAN":
             level = str(payload.get("plan_level", "STORY_NODE")).upper()
             if level not in {"STORY_NODE", "DETAILED_PLAN", "PRODUCTION_READY"}:
                 errors.append(_issue("INVALID_PLAN_LEVEL", "plan_level must be STORY_NODE, DETAILED_PLAN, or PRODUCTION_READY", entity_id))
-            if level in {"DETAILED_PLAN", "PRODUCTION_READY"}:
-                required = ("dynamic_beats", "line_clusters", "scene_payloads")
-                if any(not isinstance(payload.get(field), list) or not payload[field] for field in required):
-                    errors.append(_issue("CAPACITY_GATE_FAILED", "detailed plan needs dynamic beats, line clusters, and scene payloads", entity_id))
-            if level == "PRODUCTION_READY" and not (
-                str(payload.get("expansion_status", "")).upper() == "FULL"
-                and str(payload.get("mid_chapter_load", "")).upper() == "PASS"
-                and payload.get("anti_self_certification") is True
-            ):
-                errors.append(_issue("CAPACITY_GATE_FAILED", "production-ready plan needs FULL expansion, PASS mid-chapter load, and anti-self-certification", entity_id))
+            missing = [field for field in CHAPTER_PLAN_REQUIRED_FIELDS if not _present(payload.get(field))]
+            if missing:
+                errors.append(_issue("CHAPTER_CONTRACT_MISSING", f"chapter plan needs: {', '.join(missing)}", entity_id))
+            capacity = audit_chapter_capacity(entity)
+            if level == "PRODUCTION_READY" and capacity["final_capacity"] != "FULL":
+                errors.append(_issue("CAPACITY_GATE_FAILED", "; ".join(capacity["failure_reasons"]), entity_id))
+        elif kind == "BEAT":
+            level = str(payload.get("plan_level", "STORY_NODE")).upper()
+            if level not in {"STORY_NODE", "DETAILED_PLAN", "PRODUCTION_READY"}:
+                errors.append(_issue("INVALID_PLAN_LEVEL", "plan_level must be STORY_NODE, DETAILED_PLAN, or PRODUCTION_READY", entity_id))
         if kind == "HUMAN_STATE":
             required = ("bodily_state", "daily_routine", "social_obligations", "immediate_need")
             if any(not payload.get(field) for field in required):
                 errors.append(_issue("HUMAN_REALITY_PROFILE_MISSING", "human state needs body, routine, obligations, and immediate need", entity_id))
+
+    errors.extend(audit_chapter_set(packet))
 
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -355,7 +572,7 @@ def build_context_from_packet(packet: dict, anchors: list[str], max_hops: int = 
         return [
             entities[entity_id]
             for entity_id in sorted(reachable)
-            if str(entities[entity_id].get("kind", "")).upper() in kinds
+            if entity_id in entities and str(entities[entity_id].get("kind", "")).upper() in kinds
         ]
 
     hyperedges: list[dict] = []
@@ -384,11 +601,11 @@ def build_context_from_packet(packet: dict, anchors: list[str], max_hops: int = 
     ], key=lambda item: item.get("id", ""))
     hard_canon = [
         entities[entity_id] for entity_id in sorted(reachable)
-        if str(entities[entity_id].get("namespace", "")).upper() == "CANON"
+        if entity_id in entities and str(entities[entity_id].get("namespace", "")).upper() == "CANON"
     ]
     plan = [
         entities[entity_id] for entity_id in sorted(reachable)
-        if str(entities[entity_id].get("namespace", "")).upper() == "PLAN"
+        if entity_id in entities and str(entities[entity_id].get("namespace", "")).upper() == "PLAN"
     ]
     negative_facts = sorted(str(fact) for fact in packet.get("negative_facts", []))
     missing_sections = []
@@ -416,7 +633,7 @@ def build_context_from_packet(packet: dict, anchors: list[str], max_hops: int = 
         ),
         "hyperedges": hyperedges,
         "negative_facts": negative_facts,
-        "provenance_refs": sorted({ref for entity_id in reachable for ref in (entities[entity_id].get("payload") or {}).get("provenance_refs", [])}),
+        "provenance_refs": sorted({ref for entity_id in reachable if entity_id in entities for ref in (entities[entity_id].get("payload") or {}).get("provenance_refs", [])}),
         "retrieval_sufficiency": "SUFFICIENT" if not missing_sections else "INSUFFICIENT",
         "missing": missing_sections,
     }
@@ -790,7 +1007,15 @@ class CanonicalStore:
                     ensure_ascii=False,
                     sort_keys=True,
                 )
-                changes.append(("ENTITY", row[1], "UPSERT", before, after))
+                changed = old is None or any(
+                    old[column] != value
+                    for column, value in (
+                        ("kind", row[2]), ("namespace", row[3]), ("status", row[4]),
+                        ("name", row[5]), ("payload_json", row[6]),
+                    )
+                )
+                if changed:
+                    changes.append(("ENTITY", row[1], "UPSERT", before, after))
 
             for row in edge_rows:
                 old = connection.execute(
@@ -821,7 +1046,15 @@ class CanonicalStore:
                     ensure_ascii=False,
                     sort_keys=True,
                 )
-                changes.append(("EDGE", row[1], "UPSERT", before, after))
+                changed = old is None or any(
+                    old[column] != value
+                    for column, value in (
+                        ("edge_type", row[2]), ("source_id", row[3]), ("target_id", row[4]),
+                        ("namespace", row[5]), ("status", row[6]), ("payload_json", row[7]),
+                    )
+                )
+                if changed:
+                    changes.append(("EDGE", row[1], "UPSERT", before, after))
 
             connection.execute("DELETE FROM negative_facts WHERE project_id = ?", (project_id,))
             negative_facts = effective_packet.get("negative_facts", [])
@@ -1053,12 +1286,19 @@ def render_packet_markdown(packet: dict, title: str = "VNext Outline", project_i
             "EVENT": ("active_actor", "actor_goal", "action", "choice", "cost", "state_delta", "causal_inputs", "causal_outputs", "time_window", "location", "line_refs"),
             "LINE": ("owner", "goal", "pressure", "opposing_force", "milestones", "climax_condition", "closure_condition", "status"),
             "PROMISE": ("creation_event", "maturity_condition", "reveal_window", "payoff_event", "status", "post_payoff_state"),
-            "CHAPTER_PLAN": ("plan_level", "dynamic_beats", "line_clusters", "scene_payloads", "expansion_status", "mid_chapter_load"),
+            "CHAPTER_PLAN": (
+                "chapter_no", "volume_ref", "plan_level", "target_prose_contract", "chapter_function",
+                "core_delta", "conflict_contract", "dynamic_beats", "payload_clusters", "scene_payloads",
+                "explicit_compression", "continuation_source", "forbidden_drift",
+            ),
         }.get(kind, tuple(sorted(payload)))
-        return "; ".join(
+        summary = "; ".join(
             f"{field}={json.dumps(payload[field], ensure_ascii=False, sort_keys=True)}"
             for field in fields if field in payload
         )
+        if kind == "CHAPTER_PLAN":
+            summary += "; capacity_audit=" + json.dumps(audit_chapter_capacity(item), ensure_ascii=False, sort_keys=True)
+        return summary
 
     for heading, kinds in SECTION_ORDER:
         lines.extend([f"# {heading}", ""])
@@ -1070,7 +1310,7 @@ def render_packet_markdown(packet: dict, title: str = "VNext Outline", project_i
                 emitted.add(item["id"])
             elif roster and str(item.get("kind", "")).upper() == "CHARACTER":
                 identity = (item.get("payload") or {}).get("identity", "")
-                lines.append(f"- **{item.get('name', item['id'])}** [{identity}]")
+                lines.append(f"- `{item['id']}` **{item.get('name', item['id'])}** [{identity}]")
             else:
                 lines.append(f"- `{item['id']}` **{item.get('name', item['id'])}** [{item.get('kind', 'UNKNOWN')}] — {payload_summary(item)}")
                 emitted.add(item["id"])
@@ -1235,7 +1475,9 @@ class GraphProjector:
                     "source": after["source_id"], "target": after["target_id"],
                     "props": {
                         "project_id": project_id, "type": after["edge_type"],
-                        "namespace": after["namespace"], "status": after["status"], **payload,
+                        "namespace": after["namespace"], "status": after["status"],
+                        "role": payload.get("role") if isinstance(payload, dict) else None,
+                        "payload": _canonical_json(payload),
                     },
                 })
             versions.append(int(change.get("version", 0)))

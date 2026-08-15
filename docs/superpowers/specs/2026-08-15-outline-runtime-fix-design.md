@@ -9,7 +9,7 @@
 - 保留 Python 标准库、SQLite、可选本地 Neo4j 和现有 CLI。
 - 不加入模型 API、网页、服务层或第三方依赖。
 - Python 只做结构化校验；语义创作仍由上游 Codex 生成 Packet。
-- 默认按用户要求把全书章节视为需要详细章纲；`precision.full_book_detailed_required=false` 可用于明确的索引模式。
+- 生产 Packet 显式设置 `precision.full_book_detailed_required=true`，把全书章节视为需要详细章纲；仅索引 Packet 可设置为 `false`。
 
 ## 核心契约
 

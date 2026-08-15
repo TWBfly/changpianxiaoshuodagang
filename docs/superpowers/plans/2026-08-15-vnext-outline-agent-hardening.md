@@ -1,9 +1,9 @@
 # VNext Outline Agent Hardening Implementation Plan
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task with verification checkpoints.
 
-**Goal:** 修复 VNext 长篇大纲运行时的状态一致性、可审计性、图检索、人物活人感字段、细纲容量闸门与输出可读性问题；保持纯本地、只写大纲、不接 Ollama 或第三方 API。
+**Goal:** 修复 VNext 长篇大纲运行时的状态一致性、可审计性、图检索、人物活人感字段、独立细纲容量闸门与输出可读性问题；保持纯本地、只写大纲、不接 Ollama 或第三方 API。
 
-**Architecture:** SQLite Canon 是唯一写入真相源；每次提交明确为 `SNAPSHOT` 或 `PATCH`，保存完整快照与删除 outbox；Neo4j 只作可重建投影和只读检索，失败时显式降级；审计器在提交前阻止断因果、断人物能动性、断来源和不具备生产容量的细纲；Markdown 由结构化字段生成一次性总纲。
+**Architecture:** SQLite Canon 是唯一写入真相源；每次提交明确为 `SNAPSHOT` 或 `PATCH`，保存完整快照与删除 outbox；Neo4j 只作可重建投影和只读检索，失败时显式降级；审计器根据结构事实独立计算章节容量，在提交前阻止断因果、断人物能动性、断来源和不具备生产容量的细纲；Markdown 由结构化字段生成一次性总纲。
 
 **Tech Stack:** Python 3 标准库、SQLite、Neo4j `cypher-shell`（可选本地投影）、unittest、Markdown。
 
@@ -42,7 +42,7 @@
 
 **Files:** `.agents/skills/vnext-outline-agent/scripts/outline_agent.py`, `.agents/skills/vnext-outline-agent/scripts/test_outline_agent.py`, `.agents/skills/vnext-outline-agent/scripts/demo_packet.json`, `.agents/skills/vnext-outline-agent/references/output-contract.md`
 
-**Interfaces:** CORE/MAJOR 人物必须有 `biography`, `decision_model`, `private_life`, `life_constraints`, `arc`, `fate`, `highlights`；关系/线/承诺引用必须存在且状态闭合；`CHAPTER_PLAN`/`BEAT` 支持 `STORY_NODE`、`DETAILED_PLAN`、`PRODUCTION_READY` 三档与动态节拍、群像线、场景承载、扩写和中段负荷检查。
+**Interfaces:** CORE/MAJOR 人物必须有 `biography`, `decision_model`, `private_life`, `life_constraints`, `arc`, `fate`, `highlights`；关系/线/承诺引用必须存在且状态闭合；`CHAPTER_PLAN`/`BEAT` 支持 `STORY_NODE`、`DETAILED_PLAN`、`PRODUCTION_READY` 三档与动态节拍、`payload_clusters`、场景承载、扩写和中段负荷独立检查。
 
 **Tests:** 缺人物生平/私生活失败、闭合线状态一致性失败、生产就绪细纲容量失败/通过、因果输入输出与边不一致失败。
 

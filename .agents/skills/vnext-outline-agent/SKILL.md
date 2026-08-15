@@ -34,6 +34,16 @@ dependency.
   references, unresolved promises, and unexplained late arrivals.
 - A packet is explicitly `SNAPSHOT` (omitted Canon is deleted) or `PATCH`
   (omitted Canon is preserved); repeated snapshots are idempotent.
+- Packet entity-specific data lives in `payload`; source links live in
+  `payload.provenance_refs`. Do not emit the older `attributes`/`provenance`
+  aliases.
+- A `PRODUCTION_READY` `CHAPTER_PLAN` must carry structured dynamic beats,
+  payload clusters, scene payloads, explicit compression, continuation source,
+  and forbidden drift. Capacity is computed by the runtime; never self-certify
+  it with `FULL`, `PASS`, or `anti_self_certification` flags.
+- Production packets set `precision.full_book_detailed_required` to true: every
+  chapter number then needs one `PRODUCTION_READY` plan and the expected range
+  must be complete. Set it to false only for an explicit index-only packet.
 - Neo4j is a rebuildable projection, not the source of truth. SQLite is the
   transaction ledger and outbox. If local Neo4j cannot authenticate/connect,
   record `DEGRADED` and surface the reason; never claim graph sync succeeded.
@@ -47,12 +57,14 @@ dependency.
    `space.location_id` wherever applicable.
 3. Run the state machine: `STATE → AGENCY → SEARCH → SELECT → OUTLINE →
    INTEGRATE`. Keep candidate packets separate until selection.
-4. Validate before commit. Fix the first reported `ValidationError`; do not
+4. For each detailed chapter, run the independent capacity audit and repair
+   the first `CAPACITY_GATE_FAILED`; do not treat result sentences as beats.
+5. Validate before commit. Fix the first reported `ValidationError`; do not
    bypass validation or silently drop information.
-5. Commit the complete packet to SQLite, then enqueue/project its outbox
+6. Commit the complete packet to SQLite, then enqueue/project its outbox
    changes to local Neo4j. Query bounded neighborhoods and causal paths for
    later phases; keep retrieval IDs and provenance in the context packet.
-6. Export stable Markdown and an audit report. The final outline must contain
+7. Export stable Markdown and an audit report. The final outline must contain
    character dossiers/topology, plot synopsis and act/line beats, causal and
    foreshadowing tables, timeline, locations, promises/payoffs, negative facts,
    and unresolved risks.
