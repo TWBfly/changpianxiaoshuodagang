@@ -1,5 +1,6 @@
 import json
 import os
+from copy import deepcopy
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -142,8 +143,8 @@ def build_chapter_payload(stageable_roles=None):
         "chapter_function": "让主角第一次付出不可逆代价换取证据",
         "core_delta": "证据到手，安全退路消失",
         "conflict_contract": {
-            "actor_a": "CHAR.a要证据",
-            "actor_b": "对手要保住封锁",
+            "actor_a": "CHAR.a",
+            "actor_b": "CHAR.b",
             "concrete_incompatibility": "证据与安全退路不能同时保全",
         },
         "dynamic_beats": beats,
@@ -174,12 +175,194 @@ def chapter_entity(payload=None):
     }
 
 
+def build_full_book_packet(expected_chapters=1, chapter_numbers=None):
+    chapter_numbers = chapter_numbers or list(range(1, expected_chapters + 1))
+    entities = [
+        {
+            "id": "CHAR.a",
+            "kind": "CHARACTER",
+            "namespace": "PLAN",
+            "name": "沈砚",
+            "payload": {
+                "identity": "调查员", "desires": ["查清旧案"], "goals": ["保住证据"],
+                "interests": ["真相"], "constraints": ["权限不足"], "preferred_strategy": "交换",
+                "character_tier": "SUPPORT", "provenance_refs": ["USER.1"],
+            },
+        },
+        {
+            "id": "CHAR.b",
+            "kind": "CHARACTER",
+            "namespace": "PLAN",
+            "name": "顾青禾",
+            "payload": {
+                "identity": "档案员", "desires": ["保住家人"], "goals": ["公开档案"],
+                "interests": ["社区"], "constraints": ["被追踪"], "preferred_strategy": "谈判",
+                "character_tier": "SUPPORT", "provenance_refs": ["USER.1"],
+            },
+        },
+        {
+            "id": "PROJECT.full",
+            "kind": "PROJECT",
+            "namespace": "CONTRACT",
+            "name": "完整长篇项目",
+            "payload": {
+                "one_sentence_synopsis": "一个被旧案追杀的归来者必须在夺回真相和拆掉个人权力之间作出选择。",
+                "causal_summary": "旧案制造归来者，归来者揭开利益链，利益链逼出制度选择，终局以公开审计结算。",
+                "provenance_refs": ["USER.1"],
+            },
+        },
+        {
+            "id": "VOLUME.1",
+            "kind": "VOLUME",
+            "namespace": "PLAN",
+            "name": "第一卷",
+            "payload": {
+                "chapter_start": 1,
+                "chapter_end": expected_chapters,
+                "detailed_plot": "主角回到旧城，在一场产权与证据争夺中建立第一组盟友，并发现旧案不是单一反派造成。",
+                "central_conflict": "主角要保住证据与普通人的安全，对手要用合法程序销毁证据。",
+                "turning_points": ["归来暴露", "盟友倒戈", "旧案反转", "进入下一地图"],
+                "payoff": "第一段责任链公开，主角失去旧身份但取得下一地图的合法入口。",
+                "next_hook": "下一卷的控制系统在港口重新启动。",
+                "provenance_refs": ["USER.1"],
+            },
+        },
+    ]
+    for number in chapter_numbers:
+        payload = deepcopy(build_chapter_payload(["ACTION", "COUNTERMOVE", "REPLAN", "COST", "REVELATION", "HOOK"]))
+        for index, beat in enumerate(payload["dynamic_beats"], 1):
+            beat["active_actor"] = "CHAR.a" if index % 2 else "CHAR.b"
+            beat["delta"] = {"knowledge": f"信息变化{index}"} if index % 2 else {"resource": f"资源变化{index}"}
+        payload["chapter_no"] = number
+        payload["volume_ref"] = "VOLUME.1"
+        payload["chapter_function"] = f"第{number}章让主角用新选择换取下一条信息"
+        payload["core_delta"] = f"第{number}章的证据、关系和退路发生不可逆变化"
+        payload["provenance_refs"] = ["USER.1"]
+        payload["payload_clusters"].append({
+            "cluster_id": f"CLUSTER.{number}.3",
+            "local_goal": "把局部线索转成下一步行动",
+            "active_actors": ["CHAR.a", "CHAR.b"],
+            "conflict_medium": "公开记录与追捕",
+            "stageable_beats": ["BEAT.5", "BEAT.6"],
+            "local_turn": "线索反过来指向新的责任人",
+            "local_cost": "关系信任下降",
+            "exit_state": "获得下一章的行动入口",
+            "pressure_handed_to_next_cluster": "对手提前改变路线",
+        })
+        payload["scene_payloads"].append({
+            "scene_id": f"SCENE.{number}.3",
+            "entry_state": "第二条方案已经失败",
+            "active_actor_goal": "把线索交给可以验证的人",
+            "opposing_goal_or_process": "对手切断公开记录",
+            "immediate_stakes": "证据和盟友同时可能失去",
+            "live_actions": ["转移", "核验", "反制"],
+            "turn_or_reprice": "主角必须放弃一项资源",
+            "exit_state": "下一张地图被打开",
+            "delta_dimensions": ["knowledge", "relationship", "path"],
+            "payload_cluster_refs": [f"CLUSTER.{number}.3"],
+        })
+        entities.append({
+            "id": f"CHAPTER.{number}",
+            "kind": "CHAPTER_PLAN",
+            "namespace": "PLAN",
+            "name": f"第{number}章",
+            "payload": payload,
+        })
+    return {
+        "entities": entities,
+        "edges": [],
+        "precision": {
+            "production_stage": "FINAL_FULL_BOOK",
+            "full_book_detailed_required": True,
+            "expected_volumes": 1,
+            "expected_chapters": expected_chapters,
+        },
+    }
+
+
 class CanonicalStoreTests(unittest.TestCase):
     def test_init_creates_version_zero_and_empty_project(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CanonicalStore(Path(tmp) / "outline.db")
             self.assertEqual(store.init_project("PROJECT.demo", "Demo"), 0)
             self.assertEqual(store.get_version("PROJECT.demo"), 0)
+
+
+class FullBookContractTests(unittest.TestCase):
+    def test_final_full_book_cannot_disable_full_detail_gate(self):
+        packet = build_full_book_packet(expected_chapters=2, chapter_numbers=[1])
+        packet["precision"]["full_book_detailed_required"] = False
+        report = audit_packet(packet)
+        codes = {item["code"] for item in report.errors}
+        self.assertIn("FULL_BOOK_MODE_REQUIRED", codes)
+
+    def test_full_book_requires_synopsis_scope_and_volume_details(self):
+        packet = build_full_book_packet(expected_chapters=2, chapter_numbers=[1, 2])
+        project = next(entity for entity in packet["entities"] if entity["kind"] == "PROJECT")
+        project["payload"].pop("one_sentence_synopsis")
+        report = audit_packet(packet)
+        self.assertIn("PROJECT_SYNOPSIS_MISSING", {item["code"] for item in report.errors})
+
+    def test_full_book_rejects_thin_long_chapter(self):
+        packet = build_full_book_packet(expected_chapters=1, chapter_numbers=[1])
+        chapter = next(entity for entity in packet["entities"] if entity["kind"] == "CHAPTER_PLAN")
+        chapter["payload"]["dynamic_beats"] = chapter["payload"]["dynamic_beats"][:4]
+        report = audit_packet(packet)
+        self.assertIn("CHAPTER_PAYLOAD_SHORTFALL", {item["code"] for item in report.errors})
+
+    def test_final_full_book_rejects_prose_range_outside_policy(self):
+        packet = build_full_book_packet(expected_chapters=1, chapter_numbers=[1])
+        contract = next(entity for entity in packet["entities"] if entity["kind"] == "CHAPTER_PLAN")["payload"]["target_prose_contract"]
+        contract.update({"target_min": 1, "target_max": 99999})
+        report = audit_packet(packet)
+        self.assertIn("TARGET_PROSE_RANGE_OUT_OF_POLICY", {item["code"] for item in report.errors})
+
+    def test_final_full_book_rejects_unknown_volume_reference(self):
+        packet = build_full_book_packet(expected_chapters=1, chapter_numbers=[1])
+        chapter = next(entity for entity in packet["entities"] if entity["kind"] == "CHAPTER_PLAN")
+        chapter["payload"]["volume_ref"] = "VOLUME.missing"
+        report = audit_packet(packet)
+        self.assertIn("CHAPTER_VOLUME_REFERENCE_INVALID", {item["code"] for item in report.errors})
+
+    def test_final_full_book_rejects_incomplete_beat_and_scene_coverage(self):
+        packet = build_full_book_packet(expected_chapters=1, chapter_numbers=[1])
+        chapter = next(entity for entity in packet["entities"] if entity["kind"] == "CHAPTER_PLAN")["payload"]
+        chapter["payload_clusters"][0]["stageable_beats"] = []
+        chapter["scene_payloads"][2]["payload_cluster_refs"] = ["CLUSTER.1"]
+        report = audit_packet(packet)
+        codes = {item["code"] for item in report.errors}
+        self.assertIn("CHAPTER_BEAT_CLUSTER_COVERAGE", codes)
+        self.assertIn("CHAPTER_SCENE_CLUSTER_COVERAGE", codes)
+
+    def test_final_full_book_rejects_duplicate_core_beat_delta(self):
+        packet = build_full_book_packet(expected_chapters=1, chapter_numbers=[1])
+        chapter = next(entity for entity in packet["entities"] if entity["kind"] == "CHAPTER_PLAN")["payload"]
+        chapter["dynamic_beats"][1]["delta"] = deepcopy(chapter["dynamic_beats"][0]["delta"])
+        report = audit_packet(packet)
+        self.assertIn("CHAPTER_DUPLICATE_DELTA", {item["code"] for item in report.errors})
+
+    def test_malformed_final_entities_return_audit_error(self):
+        packet = build_full_book_packet(expected_chapters=1, chapter_numbers=[1])
+        packet["entities"].append(None)
+        report = audit_packet(packet)
+        self.assertIn("INVALID_ENTITY", {item["code"] for item in report.errors})
+
+    def test_final_full_book_rejects_invalid_project_text_and_actor_reference(self):
+        packet = build_full_book_packet(expected_chapters=1, chapter_numbers=[1])
+        project = next(entity for entity in packet["entities"] if entity["kind"] == "PROJECT")
+        project["payload"]["one_sentence_synopsis"] = 42
+        chapter = next(entity for entity in packet["entities"] if entity["kind"] == "CHAPTER_PLAN")
+        chapter["payload"]["dynamic_beats"][0]["active_actor"] = "CHAR.missing"
+        report = audit_packet(packet)
+        codes = {item["code"] for item in report.errors}
+        self.assertIn("PROJECT_SYNOPSIS_INVALID", codes)
+        self.assertIn("CHAPTER_ACTOR_REFERENCE_INVALID", codes)
+
+    def test_export_has_synopsis_volume_index_then_detailed_chapters(self):
+        text = render_packet_markdown(build_full_book_packet(expected_chapters=2, chapter_numbers=[1, 2]))
+        self.assertLess(text.index("全书一句话总纲"), text.index("卷级详细剧情"))
+        self.assertLess(text.index("卷级详细剧情"), text.index("全章目录与推进表"))
+        self.assertLess(text.index("全章目录与推进表"), text.index("指定窗口详细章纲"))
 
     def test_stale_expected_version_is_rejected_without_partial_write(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -829,6 +1012,101 @@ class DemoTests(unittest.TestCase):
         self.assertIn("CHAPTER.1", text)
         self.assertIn("capacity_audit", text)
         self.assertIn("`CHAR.shenyan`", text)
+
+
+class AdversarialRobustnessTests(unittest.TestCase):
+    def test_cypher_literal_handles_multiline_newlines_and_quotes(self):
+        from outline_agent import _cypher_literal
+        sample = "第1行：主角深入敌阵\n第2行：发现'密信'与反斜杠\\内容\r\n第3行：制表符\t测试"
+        literal = _cypher_literal(sample)
+        self.assertTrue(literal.startswith("'") and literal.endswith("'"))
+        self.assertNotIn("\n", literal)
+        self.assertNotIn("\r", literal)
+        self.assertNotIn("\t", literal)
+        self.assertIn("\\n", literal)
+        self.assertIn("\\'", literal)
+        self.assertIn("\\\\", literal)
+
+    def test_merge_patch_with_negative_facts_override_and_registry_dict_merge(self):
+        base = {
+            "entities": [{"id": "CHAR.1", "name": "A"}],
+            "edges": [],
+            "negative_facts": ["FACT.old1", "FACT.old2"],
+            "provenance_registry": {"SRC.1": "brief-1", "SRC.2": "brief-2"},
+        }
+        patch = {
+            "entities": [{"id": "CHAR.2", "name": "B"}],
+            "negative_facts": ["FACT.new_only"],
+            "provenance_registry": {"SRC.2": "brief-2-updated", "SRC.3": "brief-3"},
+        }
+        merged = CanonicalStore._merge_patch(base, patch)
+        self.assertEqual(merged["negative_facts"], ["FACT.new_only"])
+        self.assertEqual(merged["provenance_registry"], {
+            "SRC.1": "brief-1",
+            "SRC.2": "brief-2-updated",
+            "SRC.3": "brief-3",
+        })
+        self.assertEqual(len(merged["entities"]), 2)
+
+    def test_audit_chapter_capacity_with_adaptive_literary_beats(self):
+        payload = build_chapter_payload(["ACTION", "COUNTERMOVE", "REPLAN", "COST", "CLIMAX"])
+        chapter = {
+            "id": "CHAPTER_PLAN.1",
+            "kind": "CHAPTER_PLAN",
+            "namespace": "PLAN",
+            "payload": payload,
+        }
+        capacity = outline_agent.audit_chapter_capacity(chapter)
+        self.assertEqual(capacity["final_capacity"], "FULL")
+        self.assertEqual(capacity["mid_chapter_load"], "PASS")
+
+    def test_global_topological_causal_time_inversion_rejected(self):
+        packet = {
+            "entities": [
+                {"id": "CHAR.a", "kind": "CHARACTER", "name": "主角", "payload": {
+                    "identity": "修士", "desires": ["复仇"], "goals": ["夺宝"], "interests": ["生机"],
+                    "constraints": ["重伤"], "preferred_strategy": "暗杀", "provenance_refs": ["U.1"],
+                }},
+                {"id": "EVENT.1", "kind": "EVENT", "name": "夺宝事件", "payload": {
+                    "active_actor": "CHAR.a", "provenance_refs": ["U.1"], "time_index": 100,
+                    "causal_inputs": ["CHAR.a"], "causal_outputs": ["EVENT.2"],
+                    "action": "抢夺古玉", "state_delta": "古玉到手",
+                }},
+                {"id": "EVENT.2", "kind": "EVENT", "name": "中间转移", "payload": {
+                    "active_actor": "CHAR.a", "provenance_refs": ["U.1"],
+                    "causal_inputs": ["EVENT.1"], "causal_outputs": ["EVENT.3"],
+                    "action": "遁入密道", "state_delta": "摆脱追兵",
+                }},
+                {"id": "EVENT.3", "kind": "EVENT", "name": "炼化古玉", "payload": {
+                    "active_actor": "CHAR.a", "provenance_refs": ["U.1"], "time_index": 50,  # 严重时间倒流！
+                    "causal_inputs": ["EVENT.2"], "causal_outputs": ["CHAR.a"],
+                    "action": "炼化突破", "state_delta": "境界提升",
+                }},
+            ],
+            "edges": [
+                {"id": "E.p1", "type": "PARTICIPATES_IN", "source": "CHAR.a", "target": "EVENT.1", "payload": {"role": "initiator"}},
+                {"id": "E.p2", "type": "PARTICIPATES_IN", "source": "CHAR.a", "target": "EVENT.2", "payload": {"role": "initiator"}},
+                {"id": "E.p3", "type": "PARTICIPATES_IN", "source": "CHAR.a", "target": "EVENT.3", "payload": {"role": "initiator"}},
+                {"id": "E.c1", "type": "CAUSES", "source": "EVENT.1", "target": "EVENT.2", "payload": {}},
+                {"id": "E.c2", "type": "CAUSES", "source": "EVENT.2", "target": "EVENT.3", "payload": {}},
+            ],
+        }
+        report = audit_packet(packet)
+        self.assertFalse(report.ok)
+        errors = {e["code"] for e in report.errors}
+        self.assertIn("CAUSAL_ORDER_CONFLICT", errors)
+
+    def test_webnovel_progression_roles_pass_capacity(self):
+        payload = build_chapter_payload(["PRESSURE", "COUNTERMOVE", "CLIMAX", "PAYOFF"])
+        chapter = {
+            "id": "CHAPTER_PLAN.1",
+            "kind": "CHAPTER_PLAN",
+            "namespace": "PLAN",
+            "payload": payload,
+        }
+        capacity = outline_agent.audit_chapter_capacity(chapter)
+        self.assertEqual(capacity["final_capacity"], "FULL")
+        self.assertEqual(capacity["mid_chapter_load"], "PASS")
 
 
 if __name__ == "__main__":

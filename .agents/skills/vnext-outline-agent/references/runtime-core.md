@@ -54,6 +54,25 @@ Neo4j stores an event as a reified node:
 (EVENT.1)-[:REL {type:'RESULTS_IN'}]->(PROP.x)
 ```
 
+## Full-book scope gate
+
+The runtime distinguishes phase packets from a final complete outline. A
+packet declaring `precision.production_stage = FINAL_FULL_BOOK` must also set
+`full_book_detailed_required = true`, declare positive
+`expected_volumes` and `expected_chapters`, and include a `PROJECT`
+payload with `one_sentence_synopsis` and `causal_summary`.
+
+Each declared `VOLUME` must cover a contiguous chapter range and include
+`detailed_plot`, `central_conflict`, `turning_points`, `payoff`, and
+`next_hook`. The ranges must cover every chapter from 1 through
+`expected_chapters` exactly once.
+
+Every chapter in final mode must be `PRODUCTION_READY` and pass the strict
+4000–6000-character payload audit: at least six stageable core beats, three
+payload clusters, three core scenes, two active actors, two information or
+choice updates, and two delta dimensions. A packet-supplied `FULL` flag never
+overrides this computed result.
+
 The event node preserves the whole N-ary relation, event time, location,
 evidence, and provenance. Do not replace it with pairwise character edges.
 

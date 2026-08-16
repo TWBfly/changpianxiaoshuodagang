@@ -114,6 +114,10 @@ CHAPTER_PLAN_REQUIRED_FIELDS = (
     "conflict_contract", "dynamic_beats", "payload_clusters", "scene_payloads",
     "explicit_compression", "continuation_source", "forbidden_drift",
 )
+VOLUME_REQUIRED_FIELDS = (
+    "chapter_start", "chapter_end", "detailed_plot", "central_conflict",
+    "turning_points", "payoff", "next_hook",
+)
 STAGEABLE_BEAT_REQUIRED_FIELDS = (
     "cause_from_previous", "active_actor", "action", "counterforce",
     "new_information_or_choice", "delta", "actor_goal_before", "actor_goal_after",
@@ -138,7 +142,107 @@ def _present(value: Any) -> bool:
     return value is not None and value != "" and value != [] and value != {}
 
 
-def audit_chapter_capacity(entity: dict) -> dict:
+def _is_final_full_book(packet: dict) -> bool:
+    precision = packet.get("precision") if isinstance(packet, dict) else {}
+    return isinstance(precision, dict) and str(precision.get("production_stage", "")).upper() == "FINAL_FULL_BOOK"
+
+
+def audit_outline_scope(packet: dict) -> list[dict]:
+    """Audit the hierarchy that makes a packet a complete long-form outline."""
+    if not _is_final_full_book(packet):
+        return []
+    precision = packet.get("precision", {})
+    if precision.get("full_book_detailed_required") is not True:
+        return [_issue("FULL_BOOK_MODE_REQUIRED", "FINAL_FULL_BOOK requires full_book_detailed_required=true")]
+
+    entities = packet.get("entities", []) if isinstance(packet, dict) else []
+    valid_entities = [item for item in entities if isinstance(item, dict)]
+    projects = [item for item in valid_entities if str(item.get("kind", "")).upper() == "PROJECT"]
+    volumes = [item for item in valid_entities if str(item.get("kind", "")).upper() == "VOLUME"]
+    plans = [item for item in valid_entities if str(item.get("kind", "")).upper() == "CHAPTER_PLAN"]
+    errors: list[dict] = []
+
+    if not projects:
+        errors.append(_issue("PROJECT_ENTITY_MISSING", "FINAL_FULL_BOOK requires one PROJECT entity"))
+    elif len(projects) > 1:
+        errors.append(_issue("PROJECT_ENTITY_COUNT_INVALID", "FINAL_FULL_BOOK requires exactly one PROJECT entity"))
+    else:
+        project_payload = projects[0].get("payload") if isinstance(projects[0].get("payload"), dict) else {}
+        synopsis = project_payload.get("one_sentence_synopsis")
+        causal_summary = project_payload.get("causal_summary")
+        if not isinstance(synopsis, str) or not synopsis.strip():
+            code = "PROJECT_SYNOPSIS_MISSING" if not _present(synopsis) else "PROJECT_SYNOPSIS_INVALID"
+            errors.append(_issue(code, "PROJECT needs a non-empty string one_sentence_synopsis", projects[0].get("id")))
+        if not isinstance(causal_summary, str) or not causal_summary.strip():
+            code = "PROJECT_CAUSAL_SUMMARY_MISSING" if not _present(causal_summary) else "PROJECT_CAUSAL_SUMMARY_INVALID"
+            errors.append(_issue(code, "PROJECT needs a non-empty string causal_summary", projects[0].get("id")))
+
+    expected_volumes = precision.get("expected_volumes")
+    expected_chapters = precision.get("expected_chapters")
+    if not isinstance(expected_volumes, int) or expected_volumes < 1 or not isinstance(expected_chapters, int) or expected_chapters < 1:
+        errors.append(_issue("OUTLINE_SCOPE_MISSING", "FINAL_FULL_BOOK needs positive expected_volumes and expected_chapters"))
+        return errors
+
+    if len(volumes) != expected_volumes:
+        errors.append(_issue("VOLUME_PLAN_MISSING", f"expected {expected_volumes} volumes, found {len(volumes)}"))
+
+    ranges: list[tuple[int, int, str]] = []
+    for volume in volumes:
+        payload = volume.get("payload") if isinstance(volume.get("payload"), dict) else {}
+        missing = [field for field in VOLUME_REQUIRED_FIELDS if not _present(payload.get(field))]
+        if missing:
+            errors.append(_issue("VOLUME_DETAIL_MISSING", f"volume needs: {', '.join(missing)}", volume.get("id")))
+            continue
+        start, end = payload.get("chapter_start"), payload.get("chapter_end")
+        if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start or end > expected_chapters:
+            errors.append(_issue("VOLUME_RANGE_INVALID", "volume chapter range is invalid", volume.get("id")))
+            continue
+        ranges.append((start, end, volume.get("id", "")))
+
+    covered: list[int] = []
+    for start, end, _ in sorted(ranges):
+        covered.extend(range(start, end + 1))
+    if covered != list(range(1, expected_chapters + 1)):
+        errors.append(_issue("CHAPTER_COUNT_MISMATCH", "volume ranges must cover each chapter from 1 through expected_chapters exactly once"))
+
+    volume_by_id = {volume.get("id"): (volume.get("payload") or {}) for volume in volumes}
+    character_ids = {
+        entity.get("id") for entity in valid_entities
+        if str(entity.get("kind", "")).upper() in {"CHAR", "CHARACTER", "PERSON"} and isinstance(entity.get("id"), str)
+    }
+    seen_patterns: dict[tuple[str, str], str] = {}
+    for plan in plans:
+        payload = plan.get("payload") if isinstance(plan.get("payload"), dict) else {}
+        number = payload.get("chapter_no")
+        volume_id = payload.get("volume_ref")
+        volume_payload = volume_by_id.get(volume_id)
+        if volume_id not in volume_by_id:
+            errors.append(_issue("CHAPTER_VOLUME_REFERENCE_INVALID", "chapter volume_ref must reference an existing VOLUME", plan.get("id")))
+        elif isinstance(number, int) and isinstance(volume_payload, dict):
+            start, end = volume_payload.get("chapter_start"), volume_payload.get("chapter_end")
+            if not isinstance(start, int) or not isinstance(end, int) or not start <= number <= end:
+                errors.append(_issue("CHAPTER_VOLUME_MISMATCH", f"chapter {number} is outside its volume range", plan.get("id")))
+        actor_refs = []
+        conflict = payload.get("conflict_contract") if isinstance(payload.get("conflict_contract"), dict) else {}
+        actor_refs.extend(conflict.get(field) for field in ("actor_a", "actor_b"))
+        actor_refs.extend(
+            beat.get("active_actor")
+            for beat in payload.get("dynamic_beats", [])
+            if isinstance(beat, dict)
+        )
+        for actor in actor_refs:
+            if isinstance(actor, str) and actor.startswith(("CHAR.", "PERSON.")) and actor not in character_ids:
+                errors.append(_issue("CHAPTER_ACTOR_REFERENCE_INVALID", "chapter actor must reference a named character entity", plan.get("id")))
+                break
+        pattern = (str(payload.get("chapter_function", "")), str(payload.get("core_delta", "")))
+        if all(pattern) and pattern in seen_patterns:
+            errors.append(_issue("DUPLICATE_CHAPTER_BEAT_PATTERN", f"chapter repeats the function/core delta of {seen_patterns[pattern]}", plan.get("id")))
+        elif all(pattern):
+            seen_patterns[pattern] = plan.get("id", "")
+    return errors
+
+
+def audit_chapter_capacity(entity: dict, strict: bool = False) -> dict:
     """Compute chapter capacity from structured dramatic facts, never self-certification flags."""
     payload = entity.get("payload") if isinstance(entity, dict) else None
     failures: list[str] = []
@@ -168,7 +272,19 @@ def audit_chapter_capacity(entity: dict) -> dict:
     else:
         target_min = contract.get("target_min")
         target_max = contract.get("target_max")
-        if not isinstance(target_min, (int, float)) or not isinstance(target_max, (int, float)) or target_min <= 0 or target_max < target_min:
+        if strict:
+            target_default = contract.get("target_default")
+            valid_policy_range = (
+                isinstance(target_min, int) and not isinstance(target_min, bool)
+                and isinstance(target_default, int) and not isinstance(target_default, bool)
+                and isinstance(target_max, int) and not isinstance(target_max, bool)
+                and 4000 <= target_min <= target_default <= target_max <= 6000
+            )
+            if not valid_policy_range:
+                failures.append("TARGET_PROSE_RANGE_OUT_OF_POLICY")
+            else:
+                target_range = [target_min, target_max]
+        elif not isinstance(target_min, (int, float)) or not isinstance(target_max, (int, float)) or target_min <= 0 or target_max < target_min:
             failures.append("TARGET_PROSE_CONTRACT_INVALID")
         else:
             target_range = [target_min, target_max]
@@ -214,6 +330,7 @@ def audit_chapter_capacity(entity: dict) -> dict:
     supporting_beats = [beat for beat in stageable if str(beat.get("stageability", "")).upper() == "SUPPORTING_STAGEABLE"]
 
     cluster_ids: set[str] = set()
+    cluster_beat_refs: set[str] = set()
     for index, cluster in enumerate(clusters):
         if not isinstance(cluster, dict):
             failures.append(f"CLUSTER_{index + 1}_INVALID")
@@ -227,9 +344,12 @@ def audit_chapter_capacity(entity: dict) -> dict:
                 failures.append("DUPLICATE_CLUSTER_ID")
             cluster_ids.add(cluster_id)
         refs = cluster.get("stageable_beats")
-        if isinstance(refs, list) and any(ref not in beat_ids for ref in refs):
-            failures.append(f"CLUSTER_{index + 1}_BEAT_REFERENCE_BROKEN")
+        if isinstance(refs, list):
+            cluster_beat_refs.update(ref for ref in refs if isinstance(ref, str))
+            if any(ref not in beat_ids for ref in refs):
+                failures.append(f"CLUSTER_{index + 1}_BEAT_REFERENCE_BROKEN")
 
+    scene_cluster_refs: list[str] = []
     for index, scene in enumerate(scenes):
         if not isinstance(scene, dict):
             failures.append(f"SCENE_{index + 1}_INVALID")
@@ -238,20 +358,65 @@ def audit_chapter_capacity(entity: dict) -> dict:
         if missing:
             failures.append(f"SCENE_{index + 1}_FIELDS_MISSING:{','.join(missing)}")
         refs = scene.get("payload_cluster_refs")
-        if isinstance(refs, list) and any(ref not in cluster_ids for ref in refs):
-            failures.append(f"SCENE_{index + 1}_CLUSTER_REFERENCE_BROKEN")
+        if isinstance(refs, list):
+            scene_cluster_refs.extend(ref for ref in refs if isinstance(ref, str))
+            if any(ref not in cluster_ids for ref in refs):
+                failures.append(f"SCENE_{index + 1}_CLUSTER_REFERENCE_BROKEN")
 
     if mode in CHAPTER_MODES:
-        if len(core_beats) < 4:
-            failures.append("STAGEABLE_CORE_BEAT_SHORTFALL")
-        if len(clusters) < 2:
-            failures.append("PAYLOAD_CLUSTER_SHORTFALL")
-        if len(scenes) < 2:
-            failures.append("CORE_SCENE_SHORTFALL")
+        minimum_beats = 6 if strict else 4
+        minimum_clusters = 3 if strict else 2
+        minimum_scenes = 3 if strict else 2
+        if len(core_beats) < minimum_beats:
+            failures.append("CHAPTER_PAYLOAD_SHORTFALL" if strict else "STAGEABLE_CORE_BEAT_SHORTFALL")
+        if len(clusters) < minimum_clusters:
+            failures.append("CHAPTER_PAYLOAD_SHORTFALL" if strict else "PAYLOAD_CLUSTER_SHORTFALL")
+        if len(scenes) < minimum_scenes:
+            failures.append("CHAPTER_PAYLOAD_SHORTFALL" if strict else "CORE_SCENE_SHORTFALL")
+        if strict:
+            active_actors = {str(beat.get("active_actor")) for beat in core_beats if _present(beat.get("active_actor"))}
+            information_updates = [beat.get("new_information_or_choice") for beat in core_beats if _present(beat.get("new_information_or_choice"))]
+            delta_dimensions: set[str] = set()
+            for beat in core_beats:
+                delta = beat.get("delta")
+                if isinstance(delta, dict):
+                    delta_dimensions.update(str(key) for key in delta)
+                elif _present(delta):
+                    delta_dimensions.add("delta")
+            actions = [str(beat.get("action")) for beat in core_beats if _present(beat.get("action"))]
+            if len(active_actors) < 2:
+                failures.append("CHAPTER_ACTOR_DIVERSITY_SHORTFALL")
+            if len(information_updates) < 2:
+                failures.append("CHAPTER_INFORMATION_SHORTFALL")
+            if len(delta_dimensions) < 2:
+                failures.append("CHAPTER_INFORMATION_SHORTFALL")
+            if len(actions) != len(set(actions)):
+                failures.append("CHAPTER_DUPLICATE_ACTION")
+            core_beat_ids = {beat.get("beat_id") for beat in core_beats if isinstance(beat.get("beat_id"), str)}
+            if not core_beat_ids.issubset(cluster_beat_refs):
+                failures.append("CHAPTER_BEAT_CLUSTER_COVERAGE")
+            if len(scene_cluster_refs) < minimum_clusters or len(scene_cluster_refs) != len(set(scene_cluster_refs)):
+                failures.append("CHAPTER_SCENE_CLUSTER_COVERAGE")
+            beat_deltas = [_canonical_json(beat.get("delta")) for beat in core_beats if _present(beat.get("delta"))]
+            if len(beat_deltas) != len(set(beat_deltas)):
+                failures.append("CHAPTER_DUPLICATE_DELTA")
 
     roles = {str(beat.get("beat_role", "")).upper() for beat in core_beats}
     middle_roles = {"ACTION", "COUNTERMOVE", "REPLAN", "COST"}
-    missing_middle_roles = sorted(middle_roles - roles)
+
+    # 支持经典四步法或网文起承转合/施压-反转-兑现/高潮循环
+    INITIATION_ROLES = {"ACTION", "SETUP", "PRESSURE", "CONFRONTATION", "DISCOVERY", "PROMISE"}
+    TURNING_ROLES = {"COUNTERMOVE", "REPLAN", "ESCALATION", "TURN", "CRISIS", "COMPLICATION", "STRUGGLE"}
+    PAYOFF_ROLES = {"COST", "CLIMAX", "PAYOFF", "FACE_SLAP", "REVELATION", "HOOK", "RESOLUTION", "SACRIFICE"}
+
+    has_webnovel_progression = (
+        len(roles) >= 3
+        and any(r in INITIATION_ROLES for r in roles)
+        and any(r in TURNING_ROLES for r in roles)
+        and any(r in PAYOFF_ROLES for r in roles)
+    )
+
+    missing_middle_roles = sorted(middle_roles - roles) if not (middle_roles.issubset(roles) or has_webnovel_progression) else []
     if missing_middle_roles:
         failures.append("MID_CHAPTER_LOAD_FAILED")
 
@@ -274,7 +439,11 @@ def audit_chapter_capacity(entity: dict) -> dict:
 def audit_chapter_set(packet: dict) -> list[dict]:
     """Check whole-book chapter coverage only when the packet explicitly requests it."""
     precision = packet.get("precision") if isinstance(packet, dict) else {}
-    if not isinstance(precision, dict) or precision.get("full_book_detailed_required") is not True:
+    if not isinstance(precision, dict):
+        return []
+    if _is_final_full_book(packet) and precision.get("full_book_detailed_required") is not True:
+        return [_issue("FULL_BOOK_MODE_REQUIRED", "FINAL_FULL_BOOK requires full_book_detailed_required=true")]
+    if precision.get("full_book_detailed_required") is not True:
         return []
     plans = [
         entity for entity in packet.get("entities", [])
@@ -413,6 +582,8 @@ def audit_packet(packet: dict) -> AuditReport:
         if edge_type in CAUSAL_EDGE_TYPES:
             adjacency.setdefault(source, []).append(target)
 
+    packet_precision = packet.get("precision") if isinstance(packet.get("precision"), dict) else {}
+    strict_full_book = _is_final_full_book(packet) and packet_precision.get("full_book_detailed_required") is True
     for entity_id, entity in entity_map.items():
         kind = str(entity.get("kind", "UNKNOWN")).upper()
         payload = entity.get("payload") if isinstance(entity.get("payload"), dict) else {}
@@ -506,9 +677,13 @@ def audit_packet(packet: dict) -> AuditReport:
             missing = [field for field in CHAPTER_PLAN_REQUIRED_FIELDS if not _present(payload.get(field))]
             if missing:
                 errors.append(_issue("CHAPTER_CONTRACT_MISSING", f"chapter plan needs: {', '.join(missing)}", entity_id))
-            capacity = audit_chapter_capacity(entity)
+            capacity = audit_chapter_capacity(entity, strict=strict_full_book)
             if level == "PRODUCTION_READY" and capacity["final_capacity"] != "FULL":
+                for reason in capacity["failure_reasons"]:
+                    errors.append(_issue(reason, reason, entity_id))
                 errors.append(_issue("CAPACITY_GATE_FAILED", "; ".join(capacity["failure_reasons"]), entity_id))
+                if strict_full_book:
+                    errors.append(_issue("CHAPTER_PAYLOAD_SHORTFALL", "; ".join(capacity["failure_reasons"]), entity_id))
         elif kind == "BEAT":
             level = str(payload.get("plan_level", "STORY_NODE")).upper()
             if level not in {"STORY_NODE", "DETAILED_PLAN", "PRODUCTION_READY"}:
@@ -518,6 +693,7 @@ def audit_packet(packet: dict) -> AuditReport:
             if any(not payload.get(field) for field in required):
                 errors.append(_issue("HUMAN_REALITY_PROFILE_MISSING", "human state needs body, routine, obligations, and immediate need", entity_id))
 
+    errors.extend(audit_outline_scope(packet))
     errors.extend(audit_chapter_set(packet))
 
     visiting: set[str] = set()
@@ -543,10 +719,48 @@ def audit_packet(packet: dict) -> AuditReport:
             continue
         source = entity_map.get(edge.get("source"), {})
         target = entity_map.get(edge.get("target"), {})
-        source_time = (source.get("payload") or {}).get("time_index")
-        target_time = (target.get("payload") or {}).get("time_index")
+        source_p = source.get("payload") if isinstance(source.get("payload"), dict) else {}
+        target_p = target.get("payload") if isinstance(target.get("payload"), dict) else {}
+        source_time = source_p.get("time_index")
+        target_time = target_p.get("time_index")
         if isinstance(source_time, (int, float)) and isinstance(target_time, (int, float)) and source_time > target_time:
             errors.append(_issue("CAUSAL_ORDER_CONFLICT", "PRECEDES edge runs backward in story time", edge.get("id")))
+
+    # 全局因果拓扑时序反转检查 (Global Topological Causal Time Inversion Check)
+    time_indexed_nodes = [
+        node_id for node_id, ent in entity_map.items()
+        if isinstance(ent.get("payload"), dict) and isinstance(ent["payload"].get("time_index"), (int, float))
+    ]
+    for start_node in time_indexed_nodes:
+        start_payload = entity_map[start_node].get("payload")
+        if not isinstance(start_payload, dict):
+            continue
+        start_time = start_payload.get("time_index")
+        if not isinstance(start_time, (int, float)):
+            continue
+        queue = list(adjacency.get(start_node, []))
+        seen = set(queue)
+        while queue:
+            curr = queue.pop(0)
+            curr_payload = entity_map.get(curr, {}).get("payload")
+            curr_time = curr_payload.get("time_index") if isinstance(curr_payload, dict) else None
+            if isinstance(curr_time, (int, float)) and start_time > curr_time:
+                # 检查是否已由直接 PRECEDES 报错，避免重复报告相同两节点
+                direct_precedes = any(
+                    e.get("source") == start_node and e.get("target") == curr and str(e.get("type", "")).upper() == "PRECEDES"
+                    for e in edge_map.values()
+                )
+                if not direct_precedes:
+                    errors.append(_issue(
+                        "CAUSAL_ORDER_CONFLICT",
+                        f"causal predecessor '{start_node}' (time_index={start_time}) causally precedes '{curr}' (time_index={curr_time}) but occurs later in story time",
+                        start_node,
+                    ))
+                break
+            for nxt in adjacency.get(curr, []):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    queue.append(nxt)
 
     return AuditReport(errors, warnings, {
         "entities": len(entity_map), "edges": len(edge_map),
@@ -790,15 +1004,31 @@ class CanonicalStore:
             combined.update({item["id"]: item for item in patch.get(key, [])})
             return sorted(combined.values(), key=lambda item: item["id"])
 
+        negative_facts = (
+            patch["negative_facts"] if "negative_facts" in patch
+            else base.get("negative_facts", [])
+        )
         merged = {
             "packet_mode": "SNAPSHOT",
             "entities": merge_items("entities"),
             "edges": merge_items("edges"),
-            "negative_facts": sorted(set(base.get("negative_facts", [])) | set(patch.get("negative_facts", []))),
+            "negative_facts": sorted(set(negative_facts)),
         }
         for key, default in (("assumptions", []), ("open_questions", []), ("source_refs", []), ("precision", {})):
             merged[key] = patch[key] if key in patch else base.get(key, default)
-        merged["provenance_registry"] = patch.get("provenance_registry", base.get("provenance_registry", {}))
+
+        base_registry = base.get("provenance_registry", {})
+        patch_registry = patch.get("provenance_registry")
+        if patch_registry is None:
+            merged["provenance_registry"] = base_registry
+        elif isinstance(base_registry, dict) and isinstance(patch_registry, dict):
+            combined_registry = dict(base_registry)
+            combined_registry.update(patch_registry)
+            merged["provenance_registry"] = combined_registry
+        elif isinstance(base_registry, list) and isinstance(patch_registry, list):
+            merged["provenance_registry"] = sorted(set(base_registry + patch_registry))
+        else:
+            merged["provenance_registry"] = patch_registry
         return merged
 
     def init_project(self, project_id: str, title: str) -> int:
@@ -1243,7 +1473,14 @@ class CanonicalStore:
             lines.append("- None")
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        fd, temporary = tempfile.mkstemp(prefix=".audit-", suffix=".tmp", dir=output_path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+            os.replace(temporary, output_path)
+        except Exception:
+            Path(temporary).unlink(missing_ok=True)
+            raise
         return output_path
 
 
@@ -1274,57 +1511,226 @@ SECTION_ORDER = (
 )
 
 
+def _format_readable_value(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, list):
+        if not val:
+            return "（无）"
+        if all(isinstance(x, str) for x in val):
+            return "、".join(val)
+        return json.dumps(val, ensure_ascii=False)
+    if isinstance(val, dict):
+        return json.dumps(val, ensure_ascii=False)
+    return str(val)
+
+
 def render_packet_markdown(packet: dict, title: str = "VNext Outline", project_id: str = "PROJECT.unknown") -> str:
     entities = {item["id"]: item for item in packet.get("entities", [])}
-    lines = [f"# {title}", "", f"- project_id: `{project_id}`", "- source: `SQLite Canon`", ""]
+    entity_names = {item_id: item.get("name", item_id) for item_id, item in entities.items()}
+
+    def readable_ref(value: Any) -> str:
+        if isinstance(value, str) and value in entity_names:
+            return entity_names[value]
+        return str(value) if value is not None else ""
+
+    projects = [item for item in entities.values() if str(item.get("kind", "")).upper() == "PROJECT"]
+    document_title = projects[0].get("name") if projects else title
+    lines = [f"# {document_title}", "", f"- project_id: `{project_id}`", "- source: `SQLite Canon`", ""]
     for label, key in (("假设", "assumptions"), ("开放问题", "open_questions"), ("来源", "source_refs")):
         values = packet.get(key, [])
         lines.append(f"- {label}: " + ("；".join(str(value) for value in values) if values else "（无）"))
     precision = packet.get("precision", {})
     lines.append(f"- 精度: `{json.dumps(precision, ensure_ascii=False, sort_keys=True)}`")
+    report = audit_packet(packet)
+    final_book = _is_final_full_book(packet)
+    complete = final_book and isinstance(precision, dict) and precision.get("full_book_detailed_required") is True and not report.errors
+    status = "COMPLETE" if complete else ("INCOMPLETE" if final_book else "INTERMEDIATE")
+    chapter_plans = [item for item in entities.values() if str(item.get("kind", "")).upper() == "CHAPTER_PLAN"]
+    lines.append(f"- 大纲状态: `{status}` | 声明卷数: `{precision.get('expected_volumes', '未声明') if isinstance(precision, dict) else '未声明'}` | 声明章数: `{precision.get('expected_chapters', '未声明') if isinstance(precision, dict) else '未声明'}` | 已有详细章数: `{len(chapter_plans)}`")
     lines.append("")
     emitted: set[str] = set()
 
-    def payload_summary(item: dict) -> str:
+    def format_project_readable(item: dict) -> list[str]:
         payload = item.get("payload", {})
-        kind = str(item.get("kind", "")).upper()
-        fields = {
-            "CHARACTER": ("identity", "biography", "personality", "desires", "goals", "interests", "decision_model", "private_life", "life_constraints", "knowledge_state", "misjudgments", "arc", "highlights", "fate"),
-            "EVENT": ("active_actor", "actor_goal", "action", "choice", "cost", "state_delta", "causal_inputs", "causal_outputs", "time_window", "location", "line_refs"),
-            "LINE": ("owner", "goal", "pressure", "opposing_force", "milestones", "climax_condition", "closure_condition", "status"),
-            "PROMISE": ("creation_event", "maturity_condition", "reveal_window", "payoff_event", "status", "post_payoff_state"),
-            "CHAPTER_PLAN": (
-                "chapter_no", "volume_ref", "plan_level", "target_prose_contract", "chapter_function",
-                "core_delta", "conflict_contract", "dynamic_beats", "payload_clusters", "scene_payloads",
-                "explicit_compression", "continuation_source", "forbidden_drift",
-            ),
-        }.get(kind, tuple(sorted(payload)))
-        summary = "; ".join(
-            f"{field}={json.dumps(payload[field], ensure_ascii=False, sort_keys=True)}"
-            for field in fields if field in payload
+        return [
+            f"- **一句话总纲**: {payload.get('one_sentence_synopsis', '（缺失）')}",
+            f"- **前因—发展—结局因果总纲**: {payload.get('causal_summary', '（缺失）')}",
+            f"- **原创化差异约束**: {_format_readable_value(payload.get('originality_axes', '未声明'))}",
+        ]
+
+    def format_volume_readable(item: dict) -> list[str]:
+        payload = item.get("payload", {})
+        res = [f"### `{item['id']}` **{item.get('name', item['id'])}**（第{payload.get('chapter_start', '?')}—{payload.get('chapter_end', '?')}章）"]
+        res.append(f"- **卷级详细剧情**: {payload.get('detailed_plot', '（缺失）')}")
+        res.append(f"- **核心冲突**: {payload.get('central_conflict', '（缺失）')}")
+        res.append(f"- **关键转折**: {_format_readable_value(payload.get('turning_points'))}")
+        res.append(f"- **卷末结算**: {payload.get('payoff', '（缺失）')}")
+        res.append(f"- **下一卷钩子**: {payload.get('next_hook', '（缺失）')}")
+        return res
+
+    def format_character_readable(item: dict) -> list[str]:
+        p = item.get("payload", {})
+        res = [f"- `{item['id']}` **{item.get('name', item['id'])}** [{p.get('identity', '未指定身份')}]"]
+        res.append(f"  * **人物层级**: `{p.get('character_tier', 'SUPPORT')}` | **核心欲望**: {_format_readable_value(p.get('desires'))} | **阶段目标**: {_format_readable_value(p.get('goals'))}")
+        if p.get("biography"):
+            res.append(f"  * **人物生平与成因**: {p['biography']}")
+        if p.get("personality"):
+            res.append(f"  * **性格特质**: {p['personality']} | **行为策略**: {p.get('preferred_strategy', '未定义')}")
+        if p.get("decision_model"):
+            res.append(f"  * **决策模型**: {p['decision_model']}")
+        if p.get("private_life") or p.get("life_constraints"):
+            res.append(f"  * **现实生活与羁绊**: {p.get('private_life', '无')} | **现实约束**: {_format_readable_value(p.get('life_constraints'))}")
+        if p.get("knowledge_state") or p.get("misjudgments"):
+            res.append(f"  * **认知边界与信息盲区**: {p.get('knowledge_state', '完整')} | **误判**: {_format_readable_value(p.get('misjudgments'))}")
+        if p.get("arc") or p.get("growth_arc"):
+            res.append(f"  * **成长弧光**: {p.get('arc') or p.get('growth_arc')}")
+        if p.get("highlights"):
+            res.append(f"  * **人物高光时刻**: {_format_readable_value(p.get('highlights'))}")
+        if p.get("fate"):
+            res.append(f"  * **最终命运与归宿**: {p['fate']}")
+        return res
+
+    def format_event_readable(item: dict) -> list[str]:
+        p = item.get("payload", {})
+        res = [f"### `{item['id']}` **{item.get('name', item['id'])}**"]
+        res.append(f"- **主导者/行动方**: `{p.get('active_actor', '环境/世界过程')}` | **发生地点**: `{p.get('location', '未指定')}` | **时间窗口**: `{p.get('time_window', p.get('time_index', '默认'))}`")
+        if p.get("action"):
+            res.append(f"- **核心行动**: {p['action']}")
+        if p.get("choice") or p.get("cost"):
+            res.append(f"- **所作抉择**: {p.get('choice', '常规反应')} | **付出代价**: {p.get('cost', '无')}")
+        if p.get("state_delta"):
+            res.append(f"- **产生状态变化(Delta)**: {p['state_delta']}")
+        inputs = "、".join(f"`{x}`" for x in p.get("causal_inputs", [])) if p.get("causal_inputs") else "（起始）"
+        outputs = "、".join(f"`{x}`" for x in p.get("causal_outputs", [])) if p.get("causal_outputs") else "（终结）"
+        res.append(f"- **因果链**: {inputs} $\\longrightarrow$ {outputs}")
+        return res
+
+    def format_line_readable(item: dict) -> list[str]:
+        p = item.get("payload", {})
+        res = [f"### `{item['id']}` **{item.get('name', item['id'])}** (状态: `{p.get('status', item.get('status', 'ACTIVE'))}`)"]
+        res.append(f"- **Line Owner**: `{p.get('owner', '未知')}` | **主线诉求**: {p.get('goal', '未指定')}")
+        if p.get("pressure") or p.get("opposing_force"):
+            res.append(f"- **外部压强与对抗力量**: {p.get('pressure', '')} | 对抗方: {p.get('opposing_force', '')}")
+        if p.get("milestones"):
+            res.append(f"- **里程碑演进**: {_format_readable_value(p.get('milestones'))}")
+        if p.get("climax_condition") or p.get("closure_condition"):
+            res.append(f"- **高潮触发**: {p.get('climax_condition', '无')} | **闭环结算条件**: {p.get('closure_condition', '无')}")
+        return res
+
+    def format_promise_readable(item: dict) -> list[str]:
+        p = item.get("payload", {})
+        res = [f"### `{item['id']}` **{item.get('name', item['id'])}** (状态: `{p.get('status', item.get('status', 'ACTIVE'))}`)"]
+        res.append(f"- **埋设事件**: `{p.get('creation_event', '')}` $\\to$ **揭示窗口**: `{p.get('reveal_window', '')}` $\\to$ **兑现事件**: `{p.get('payoff_event', '')}`")
+        if p.get("who_knows") or p.get("who_misunderstands"):
+            res.append(f"- **信息差博弈**: 先知者 `{_format_readable_value(p.get('who_knows'))}` vs 误解/受蒙蔽者 `{_format_readable_value(p.get('who_misunderstands'))}`")
+        if p.get("maturity_condition"):
+            res.append(f"- **成熟发酵条件**: {p['maturity_condition']}")
+        if p.get("post_payoff_state"):
+            res.append(f"- **兑现后余波与爽点结算**: {p['post_payoff_state']}")
+        return res
+
+    def format_chapter_plan_readable(item: dict) -> list[str]:
+        p = item.get("payload", {})
+        cap = audit_chapter_capacity(item, strict=_is_final_full_book(packet))
+        res = [f"### 第 {p.get('chapter_no', '?')} 章: `{item['id']}` **{item.get('name', item['id'])}** (所属卷: `{p.get('volume_ref', '')}` | 评级: `{cap.get('final_capacity')}`)", ""]
+        res.append(f"- **章节功能定位**: {p.get('chapter_function', '未定义')}")
+        res.append(f"- **核心不可逆状态变化(Core Delta)**: {p.get('core_delta', '无')}")
+        if p.get("conflict_contract"):
+            cc = p["conflict_contract"]
+            res.append(f"- **戏剧矛盾对峙**: `{readable_ref(cc.get('actor_a'))}` vs `{readable_ref(cc.get('actor_b'))}` —— 核心不可调和点: {cc.get('concrete_incompatibility', '')}")
+        if p.get("dynamic_beats"):
+            res.append("- **动态节拍链 (Dynamic Beats)**:")
+            for b in p["dynamic_beats"]:
+                res.append(f"  * **[{b.get('beat_id', '')} - {b.get('beat_role', 'BEAT')}]**: `{readable_ref(b.get('active_actor'))}`行动 `{b.get('action', '')}` $\\to$ 对手反制 `{b.get('counterforce', '')}` $\\to$ 带来变化: {_format_readable_value(b.get('delta'))}")
+        if p.get("scene_payloads"):
+            res.append("- **场景对峙切片 (Scene Payloads)**:")
+            for sc in p["scene_payloads"]:
+                res.append(f"  * `{sc.get('scene_id')}`: 入口 `{sc.get('entry_state')}` $\\to$ 对峙焦点 `{sc.get('immediate_stakes')}` $\\to$ 出口 `{sc.get('exit_state')}`")
+        if p.get("continuation_source"):
+            res.append(f"- **章末继续力 / 悬念钩子**: {p.get('continuation_source')}")
+        if p.get("forbidden_drift"):
+            res.append(f"- **禁止漂移与水文约束**: {_format_readable_value(p.get('forbidden_drift'))}")
+        res.append(f"- **容量审计与抗水审查**: `capacity_audit={json.dumps(cap, ensure_ascii=False, sort_keys=True)}`")
+        return res
+
+    project_items = [item for item in entities.values() if str(item.get("kind", "")).upper() == "PROJECT"]
+    lines.extend(["# 全书一句话总纲", ""])
+    if project_items:
+        lines.extend(format_project_readable(project_items[0]))
+        emitted.add(project_items[0]["id"])
+    else:
+        lines.append("- （缺少 PROJECT 总纲）")
+    lines.append("")
+
+    volume_items = [item for item in entities.values() if str(item.get("kind", "")).upper() == "VOLUME"]
+    lines.extend(["# 卷级详细剧情", ""])
+    for item in sorted(volume_items, key=lambda value: ((value.get("payload") or {}).get("chapter_start", 10**9), value["id"])):
+        lines.extend(format_volume_readable(item))
+        lines.append("")
+        emitted.add(item["id"])
+    if not volume_items:
+        lines.append("- （缺少卷级详细剧情）")
+    lines.append("")
+
+    lines.extend(["# 全章目录与推进表", ""])
+    for item in sorted(chapter_plans, key=lambda value: ((value.get("payload") or {}).get("chapter_no", 10**9), value["id"])):
+        payload = item.get("payload", {})
+        lines.append(
+            f"- **第{payload.get('chapter_no', '?')}章《{item.get('name', item['id'])}》** | 卷 `{readable_ref(payload.get('volume_ref'))}` | 人物 `{readable_ref(payload.get('conflict_contract', {}).get('actor_a'))}` vs `{readable_ref(payload.get('conflict_contract', {}).get('actor_b'))}` | {payload.get('chapter_function', '')} | Delta: {payload.get('core_delta', '')} | 钩子: {payload.get('continuation_source', '')}"
         )
+    if not chapter_plans:
+        lines.append("- （缺少逐章目录）")
+    lines.append("")
+
+    def payload_readable_block(item: dict) -> list[str]:
+        kind = str(item.get("kind", "")).upper()
+        if kind in {"CHARACTER", "CHAR"}:
+            return format_character_readable(item)
+        if kind == "EVENT":
+            return format_event_readable(item)
+        if kind == "LINE":
+            return format_line_readable(item)
+        if kind == "PROMISE":
+            return format_promise_readable(item)
         if kind == "CHAPTER_PLAN":
-            summary += "; capacity_audit=" + json.dumps(audit_chapter_capacity(item), ensure_ascii=False, sort_keys=True)
-        return summary
+            return format_chapter_plan_readable(item)
+        p = item.get("payload", {})
+        res = [f"- `{item['id']}` **{item.get('name', item['id'])}** [{kind}]"]
+        for k, v in sorted(p.items()):
+            res.append(f"  * **{k}**: {_format_readable_value(v)}")
+        return res
 
     for heading, kinds in SECTION_ORDER:
         lines.extend([f"# {heading}", ""])
         selected = [item for item in entities.values() if str(item.get("kind", "")).upper() in kinds and item["id"] not in emitted]
         roster = heading == "全人物总表"
-        for item in sorted(selected, key=lambda value: value["id"]):
+        if heading == "指定窗口详细章纲":
+            selected.sort(key=lambda value: ((value.get("payload") or {}).get("chapter_no", 10**9), value["id"]))
+        elif heading == "卷级架构与每卷因果脊柱":
+            selected.sort(key=lambda value: ((value.get("payload") or {}).get("chapter_start", 10**9), value["id"]))
+        elif heading == "全书剧情梗概":
+            selected.sort(key=lambda value: ((value.get("payload") or {}).get("time_index", 10**9), value["id"]))
+        else:
+            selected.sort(key=lambda value: value["id"])
+        for item in selected:
             if roster and str(item.get("kind", "")).upper() == "COHORT":
-                lines.append(f"- `{item['id']}` **{item.get('name', item['id'])}** [COHORT] — {payload_summary(item)}")
+                p = item.get("payload", {})
+                lines.append(f"- `{item['id']}` **{item.get('name', item['id'])}** [群体/阵营] — {json.dumps(p, ensure_ascii=False)}")
                 emitted.add(item["id"])
-            elif roster and str(item.get("kind", "")).upper() == "CHARACTER":
+            elif roster and str(item.get("kind", "")).upper() in {"CHARACTER", "CHAR"}:
                 identity = (item.get("payload") or {}).get("identity", "")
-                lines.append(f"- `{item['id']}` **{item.get('name', item['id'])}** [{identity}]")
+                tier = (item.get("payload") or {}).get("character_tier", "SUPPORT")
+                lines.append(f"- `{item['id']}` **{item.get('name', item['id'])}** [{tier} | {identity}]")
             else:
-                lines.append(f"- `{item['id']}` **{item.get('name', item['id'])}** [{item.get('kind', 'UNKNOWN')}] — {payload_summary(item)}")
+                lines.extend(payload_readable_block(item))
+                lines.append("")
                 emitted.add(item["id"])
         if not selected:
             matching = [item for item in entities.values() if str(item.get("kind", "")).upper() in kinds]
             lines.append("- （条目已在前置章节展开）" if matching else "- （本阶段暂无已提交条目）")
         lines.append("")
+
     lines.extend(["# 负事实与禁止漂移", ""])
     negative_facts = sorted(packet.get("negative_facts", []))
     if negative_facts:
@@ -1332,10 +1738,11 @@ def render_packet_markdown(packet: dict, title: str = "VNext Outline", project_i
     else:
         lines.append("- （暂无负事实）")
     lines.append("")
+
     lines.extend(["# 关系与因果边", ""])
     names = {item_id: item.get("name", item_id) for item_id, item in entities.items()}
     for edge in sorted(packet.get("edges", []), key=lambda value: value["id"]):
-        lines.append(f"- `{edge['id']}` `{edge.get('type', 'RELATED_TO')}`: **{names.get(edge.get('source'), edge.get('source'))}** → **{names.get(edge.get('target'), edge.get('target'))}** — {json.dumps(edge.get('payload', {}), ensure_ascii=False, sort_keys=True)}")
+        lines.append(f"- `{edge['id']}` `{edge.get('type', 'RELATED_TO')}`: **{names.get(edge.get('source'), edge.get('source'))}** $\\to$ **{names.get(edge.get('target'), edge.get('target'))}** — {json.dumps(edge.get('payload', {}), ensure_ascii=False, sort_keys=True)}")
     if not packet.get("edges"):
         lines.append("- （暂无关系边）")
     return "\n".join(lines) + "\n"
@@ -1351,8 +1758,15 @@ def _cypher_literal(value: Any) -> str:
     if isinstance(value, (int, float)):
         return repr(value)
     if isinstance(value, str):
-        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
-    if isinstance(value, list):
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+        )
+        return "'" + escaped + "'"
+    if isinstance(value, (list, tuple, set)):
         return "[" + ", ".join(_cypher_literal(item) for item in value) + "]"
     if isinstance(value, dict):
         return "{" + ", ".join(f"{key}: {_cypher_literal(item)}" for key, item in value.items()) + "}"

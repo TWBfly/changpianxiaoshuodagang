@@ -1,73 +1,61 @@
 ---
 name: vnext-outline-agent
-description: Use when creating, auditing, repairing, or integrating a Chinese long-form novel outline with named characters, multi-line plot causality, time/space consistency, provenance, and Neo4j-backed narrative memory. This skill writes outlines and structured planning data, never prose, and uses only local Python, SQLite, and optional local Neo4j.
+description: Use when creating, auditing, repairing, or integrating a Chinese long-form commercial web novel outline (商业长篇网文大纲) with named characters, multi-line plot causality, information asymmetry matrix, dopamine/tension waveform, time/space consistency, and Neo4j-backed narrative memory. This skill writes structured planning data and production outlines, using local Python, SQLite, and optional local Neo4j.
 ---
 
-# VNext long-form outline agent
+# VNext Commercial Web Novel Outline Agent (商业长篇网文大纲进化系统)
 
-## Purpose
+## Purpose & Core Philosophy
 
-Produce an executable, auditable outline rather than novel prose. The runtime is
-`.agents/skills/vnext-outline-agent/scripts/outline_agent.py`; it is standard
-library Python and has no model, Ollama, remote API, or third-party service
-dependency.
+Produce an executable, auditable, highly gripping commercial web novel outline (百万字商业网文大纲).
+The core of web novel writing lies in:
+1. **Information Asymmetry (信息差动力学)**: Who knows what, who is deceived, dramatic irony, counter-schemes, and timely truth explosions.
+2. **Expectancy, Pressure & Payoff (期待-压强-反转-爽点兑现)**: Relentless tension accumulation, irreversible choices, decisive payoffs (打脸/升级/获宝/破局), and irresistible chapter-ending hooks (追读力).
+3. **Progression Ladder (欲望与阶梯成长)**: Clear power/status/faction progression ceilings with meaningful stakes.
+4. **Anti-Water Stageable Payload (抗水文高承载剧情)**: Every beat must contain live action, counterforce, information update, relation repricing, or irreversible sacrifice.
 
-## Non-negotiable invariants
+The deterministic runtime is `.agents/skills/vnext-outline-agent/scripts/outline_agent.py` (zero external dependencies, runs locally with Python and SQLite).
 
-- Every person is a named `CHAR.*` entity with identity, biography, desire,
-  goal, interests, constraints, strategy, agency, growth, highlights, fate,
-  and provenance. Never emit placeholders such as 路人甲/乙.
-- `CORE`/`MAJOR` characters additionally carry a lived biography, private life,
-  life constraints, decision model, arc, highlights, and fate.
-- Characters act from their own goals. A plot beat must have an active actor or
-  an explicit world process; do not add people, objects, clues, or rescues from
-  nowhere.
-- `Canon` is committed truth. `Plan` is intended future structure. Candidates
-  stay outside Canon until selected. Every important fact, event, promise, and
-  relation has provenance and stable IDs.
-- Events are hyperedges: represent one N-ary event as an `EVENT.*` entity plus
-  `PARTICIPATES_IN` relations carrying roles (initiator, target, evidence,
-  location, witness, beneficiary, etc.). Do not flatten an event into unrelated
-  binary facts.
-- Causal inputs/outputs, temporal order, spatial access, negative facts, and
-  promise lifecycle must be explicit. Reject cycles, orphan events, broken
-  references, unresolved promises, and unexplained late arrivals.
-- A packet is explicitly `SNAPSHOT` (omitted Canon is deleted) or `PATCH`
-  (omitted Canon is preserved); repeated snapshots are idempotent.
-- Packet entity-specific data lives in `payload`; source links live in
-  `payload.provenance_refs`. Do not emit the older `attributes`/`provenance`
-  aliases.
-- A `PRODUCTION_READY` `CHAPTER_PLAN` must carry structured dynamic beats,
-  payload clusters, scene payloads, explicit compression, continuation source,
-  and forbidden drift. Capacity is computed by the runtime; never self-certify
-  it with `FULL`, `PASS`, or `anti_self_certification` flags.
-- Production packets set `precision.full_book_detailed_required` to true: every
-  chapter number then needs one `PRODUCTION_READY` plan and the expected range
-  must be complete. Set it to false only for an explicit index-only packet.
-- Neo4j is a rebuildable projection, not the source of truth. SQLite is the
-  transaction ledger and outbox. If local Neo4j cannot authenticate/connect,
-  record `DEGRADED` and surface the reason; never claim graph sync succeeded.
+## Non-negotiable Invariants
 
-## Workflow
+- **Named Active Agents**: Every individual actor must be a named `CHAR.*` entity with identity, desires, goals, interests, constraints, strategy, agency, growth, highlights, and fate. Never emit placeholders (路人甲/乙).
+- **Theory of Mind & Information Asymmetry**: Characters act strictly on their own bounded knowledge and misjudgments. Secrets and foreshadowing (`PROMISE.*`) must track `who_knows`, `who_misunderstands`, `maturity_condition`, `reveal_window`, and `post_payoff_state`.
+- **Dynamic Multi-Line Matrix**: Plot lines (`LINE.*`) have explicit Owners, opposing forces, milestones, climax triggers, and closure conditions.
+- **Stageable Chapter Payload & Anti-Water Rules**: `CHAPTER_PLAN` must carry target prose contract (4000-6000字), core delta, concrete conflict (`actor_a` vs `actor_b`), dynamic beats (`ACTION`, `COUNTERMOVE`, `REPLAN`, `COST`, `SETUP`, `PRESSURE`, `CLIMAX`, `PAYOFF`, `FACE_SLAP`, `REVELATION`, `HOOK`), scene payloads, and continuation hooks.
+- **Transactional Canon & Rebuildable Graph**: SQLite is the authoritative truth ledger. Neo4j is a rebuildable query projection. Repeated snapshots are idempotent.
+- **Full-book completeness**: A packet is not a finished outline until it contains one-sentence synopsis, causal summary, explicit volume ranges and detailed volume plots, a complete chapter index, and a `PRODUCTION_READY` plan for every chapter from `1..expected_chapters`.
+- **Originality gate**: Preserve only high-level mechanisms from a reference work. Rebuild names, world engine, protagonist wound, antagonist strategy, relationship engine, progression currency, reveal order, set pieces, and ending choice. Reusing signature scenes or source-specific names is a hard failure of the creative workflow.
+- **No false completion**: `precision.production_stage=FINAL_FULL_BOOK` must set `full_book_detailed_required=true`; otherwise the runtime rejects the packet. Intermediate packets must remain visibly `INCOMPLETE` when exported.
 
-1. Read the user brief and the existing outline. Extract constraints and
-   unresolved decisions; do not write prose.
-2. Build or update a packet with `CHAR`, `EVENT`, `PROP`, `LOC`, `LINE`, and
-   `PROMISE` entities plus typed edges. Include `time.valid_from/to` and
-   `space.location_id` wherever applicable.
-3. Run the state machine: `STATE → AGENCY → SEARCH → SELECT → OUTLINE →
-   INTEGRATE`. Keep candidate packets separate until selection.
-4. For each detailed chapter, run the independent capacity audit and repair
-   the first `CAPACITY_GATE_FAILED`; do not treat result sentences as beats.
-5. Validate before commit. Fix the first reported `ValidationError`; do not
-   bypass validation or silently drop information.
-6. Commit the complete packet to SQLite, then enqueue/project its outbox
-   changes to local Neo4j. Query bounded neighborhoods and causal paths for
-   later phases; keep retrieval IDs and provenance in the context packet.
-7. Export stable Markdown and an audit report. The final outline must contain
-   character dossiers/topology, plot synopsis and act/line beats, causal and
-   foreshadowing tables, timeline, locations, promises/payoffs, negative facts,
-   and unresolved risks.
+## Full-Book Production Workflow (完整长篇大纲生产流水线)
+
+Long novels are still written in batches to avoid context overflow, but batching is only an execution detail. The final packet must merge every batch and pass the complete-book gate.
+
+1. **Source mechanism extraction and originality divergence**
+   - Extract only high-level reader mechanisms such as return, revenge, hidden assets, escalation, information asymmetry, and immediate payoff.
+   - Create an originality table with at least six changed axes: protagonist wound, world engine, antagonist strategy, relationship engine, progression currency, reveal order, and ending choice.
+   - Quarantine source-specific names, signature scenes, iconic lines, exact chapter sequence, and distinctive set pieces. They cannot enter the new packet.
+2. **Scope Contract**
+   - Decide and freeze `expected_volumes`, `expected_chapters`, and contiguous `chapter_start/chapter_end` ranges before writing chapter plans.
+   - If the user has not supplied a scale, derive a proposed scale from the new story's causal capacity and present it for confirmation; never copy the source novel's chapter count.
+   - Create one `PROJECT` with `one_sentence_synopsis` and `causal_summary`.
+3. **World, character, and line architecture**
+   - Define rules, ceilings, factions, locations, resources, named active characters, information asymmetry, dynamic lines, promises, and climax nodes.
+   - Every major character needs a decision model, private life, constraints, misjudgments, arc, highlights, and fate. A woman or ordinary person cannot exist only as a trigger or reward.
+4. **Volume Plans and Master Outline**
+   - For every volume, write `chapter_start`, `chapter_end`, `detailed_plot`, `central_conflict`, `turning_points`, `payoff`, and `next_hook`.
+   - Write the complete one-sentence causal synopsis first, then the volume plots, then the cross-volume cause/effect chain. Do not jump straight to a chapter.
+5. **Complete Chapter Index**
+   - Create a `CHAPTER_PLAN` for every number from `1..expected_chapters`, at least with a unique title, volume, named actors, chapter function, core delta, and continuation hook.
+   - The index is not a substitute for detail. It is the coverage checklist used to prevent a one-chapter packet from being mislabeled as a full book.
+6. **Detailed Chapter Batches**
+   - Fill every indexed chapter with a `PRODUCTION_READY` payload. Each 4000–6000-character chapter needs at least 6 stageable core beats, 3 payload clusters, 3 scenes, 2 active actors, 2 information/choice updates, and multiple delta dimensions.
+   - Every beat must contain cause, active actor, action, counterforce, new information or choice, delta, before/after goal, and next pressure. Summary, ledger, travel, inventory, repeated reaction, and result-only text do not count.
+   - Apply batches with `PATCH`, but only set `precision.production_stage=FINAL_FULL_BOOK` and `full_book_detailed_required=true` after all chapter numbers are present.
+7. **Final audit and export**
+   - Run `audit`, require zero hard errors, then run `export`.
+   - The Markdown must visibly contain: one-sentence synopsis, detailed volume plots, full chapter index, and all detailed chapter plans in numeric order.
+   - If Neo4j is unavailable, keep SQLite Canon as the source of truth and report graph state as `DEGRADED`; never present a degraded graph projection as successful.
 
 ## Commands
 
@@ -75,10 +63,10 @@ Run from the novel project directory:
 
 ```bash
 python3 .agents/skills/vnext-outline-agent/scripts/outline_agent.py init \
-  --db .outline/novel.db --project-id novel-001 --title '项目名'
+  --db .outline/novel.db --project-id novel-001 --title '书名'
 python3 .agents/skills/vnext-outline-agent/scripts/outline_agent.py apply \
   --db .outline/novel.db --project-id novel-001 --packet packet.json \
-  --expected-version 0 --message '初始大纲'
+  --expected-version 0 --message 'Phase提交说明'
 python3 .agents/skills/vnext-outline-agent/scripts/outline_agent.py context \
   --db .outline/novel.db --project-id novel-001 --anchor CHAR.a \
   --anchor EVENT.1 --max-hops 2 --source auto
@@ -86,25 +74,8 @@ python3 .agents/skills/vnext-outline-agent/scripts/outline_agent.py audit \
   --db .outline/novel.db --project-id novel-001
 python3 .agents/skills/vnext-outline-agent/scripts/outline_agent.py graph-sync \
   --db .outline/novel.db --project-id novel-001
-python3 .agents/skills/vnext-outline-agent/scripts/outline_agent.py graph-rebuild \
-  --db .outline/novel.db --project-id novel-001
 python3 .agents/skills/vnext-outline-agent/scripts/outline_agent.py export \
   --db .outline/novel.db --project-id novel-001 --out outline.md
 ```
 
-Use `NEO4J_URI`/`NEO4J_ADDRESS`, `NEO4J_USER` or `NEO4J_USERNAME`, and
-`NEO4J_PASSWORD` only for a local Neo4j instance. The projection uses
-`cypher-shell` and the checked-in Cypher allowlist; no driver, APOC, GDS, or
-remote endpoint is required.
-
-## Failure handling
-
-Handle `INVALID_PACKET`, `STALE_VERSION`, `CAUSAL_CYCLE`,
-`NEO4J_SHELL_NOT_FOUND`, `NEO4J_TIMEOUT`, `NEO4J_QUERY_FAILED`, and
-`QUERY_NOT_ALLOWED` as actionable states. Preserve the SQLite commit and mark
-the graph outbox `DEGRADED` when Neo4j is unavailable. Include the error code,
-object ID, and provenance in the user-facing audit.
-
-Read [runtime-core.md](references/runtime-core.md) for packet and graph rules
-and [output-contract.md](references/output-contract.md) for the stable export
-shape before changing the runtime.
+Read [runtime-core.md](references/runtime-core.md) and [output-contract.md](references/output-contract.md) for full schema details. A packet that only contains a master summary or one detailed chapter is an intermediate packet, never a finished outline.
