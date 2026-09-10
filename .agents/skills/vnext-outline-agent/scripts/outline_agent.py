@@ -20,6 +20,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+ROOT_PROJECT_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent
+if str(ROOT_PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_PROJECT_DIR))
+
+try:
+    from genres.base_driver import get_genre_driver, list_registered_genres, BaseGenreDriver
+    from core.dynamic_fingerprints import validate_chapter_fingerprint, FINGERPRINT_SPECS
+    from core.narrative_physics import NarrativePhysicsValidator
+except ImportError:
+    pass
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -68,6 +79,9 @@ class AuditReport:
         counts = self.counts or {"errors": len(self.errors), "warnings": len(self.warnings)}
         return {"ok": self.ok, "errors": self.errors, "warnings": self.warnings, "counts": counts}
 
+    def __getitem__(self, item: str):
+        return self.as_dict()[item]
+
 
 def _append_graph_health(report: AuditReport, pending: list[dict], project_id: str) -> None:
     if not pending:
@@ -99,7 +113,10 @@ PROVENANCE_KINDS = {
 }
 CAUSAL_EDGE_TYPES = {"CAUSES", "PRECEDES", "RESULTS_IN"}
 PACKET_MODES = {"SNAPSHOT", "PATCH"}
-CHAPTER_MODES = {"STANDARD_LONG", "MAJOR_LONG", "QUIET_LONG"}
+CHAPTER_MODES = {
+    "STANDARD_LONG", "MAJOR_LONG", "QUIET_LONG", "DYNAMIC_FINGERPRINT",
+    "ASSAULT", "INVESTIGATION", "CRISIS", "ENSEMBLE", "PURSUIT", "TRIAL", "GOVERNANCE", "LIFESTYLE",
+}
 ALLOWED_NAMESPACES = {"CONTRACT", "CANON", "PLAN"}
 ALLOWED_STATUSES = {
     "ACTIVE", "PROPOSED", "SUPERSEDED", "INVALIDATED", "QUARANTINED",
@@ -364,9 +381,18 @@ def audit_chapter_capacity(entity: dict, strict: bool = False) -> dict:
                 failures.append(f"SCENE_{index + 1}_CLUSTER_REFERENCE_BROKEN")
 
     if mode in CHAPTER_MODES:
-        minimum_beats = 6 if strict else 4
-        minimum_clusters = 3 if strict else 2
-        minimum_scenes = 3 if strict else 2
+        if mode in {"DYNAMIC_FINGERPRINT", "ASSAULT", "INVESTIGATION", "CRISIS", "ENSEMBLE", "PURSUIT", "TRIAL", "GOVERNANCE", "LIFESTYLE"}:
+            minimum_beats = 4
+            minimum_clusters = 2
+            minimum_scenes = 1
+        elif mode == "QUIET_LONG":
+            minimum_beats = 4 if strict else 3
+            minimum_clusters = 2
+            minimum_scenes = 2
+        else:
+            minimum_beats = 6 if strict else 4
+            minimum_clusters = 3 if strict else 2
+            minimum_scenes = 3 if strict else 2
         if len(core_beats) < minimum_beats:
             failures.append("CHAPTER_PAYLOAD_SHORTFALL" if strict else "STAGEABLE_CORE_BEAT_SHORTFALL")
         if len(clusters) < minimum_clusters:
@@ -401,13 +427,23 @@ def audit_chapter_capacity(entity: dict, strict: bool = False) -> dict:
             if len(beat_deltas) != len(set(beat_deltas)):
                 failures.append("CHAPTER_DUPLICATE_DELTA")
 
-    roles = {str(beat.get("beat_role", "")).upper() for beat in core_beats}
+    roles = {str(beat.get("beat_role") or beat.get("role", "")).upper() for beat in core_beats}
     middle_roles = {"ACTION", "COUNTERMOVE", "REPLAN", "COST"}
 
-    # 支持经典四步法或网文起承转合/施压-反转-兑现/高潮循环
-    INITIATION_ROLES = {"ACTION", "SETUP", "PRESSURE", "CONFRONTATION", "DISCOVERY", "PROMISE"}
-    TURNING_ROLES = {"COUNTERMOVE", "REPLAN", "ESCALATION", "TURN", "CRISIS", "COMPLICATION", "STRUGGLE"}
-    PAYOFF_ROLES = {"COST", "CLIMAX", "PAYOFF", "FACE_SLAP", "REVELATION", "HOOK", "RESOLUTION", "SACRIFICE"}
+    # 支持经典四步法、网文起承转合/施压-反转-兑现/高潮循环，以及8类动态章节结构指纹
+    INITIATION_ROLES = {
+        "ACTION", "SETUP", "PRESSURE", "CONFRONTATION", "DISCOVERY", "PROMISE",
+        "THREAT", "PARALLEL_A", "AMBUSH", "CHARGE", "POLICY", "DAILY",
+    }
+    TURNING_ROLES = {
+        "COUNTERMOVE", "REPLAN", "ESCALATION", "TURN", "CRISIS", "COMPLICATION", "STRUGGLE",
+        "OBSTACLE", "RETREAT", "PARALLEL_B", "PURSUIT", "DEFENSE", "BACKLASH", "EMOTION",
+    }
+    PAYOFF_ROLES = {
+        "COST", "CLIMAX", "PAYOFF", "FACE_SLAP", "REVELATION", "HOOK", "RESOLUTION", "SACRIFICE",
+        "BREAKTHROUGH", "DEDUCTION", "COLLISION", "TRAP", "EVIDENCE", "COMPROMISE", "COLLABORATION",
+        "CONVERSATION", "EPIPHANY",
+    }
 
     has_webnovel_progression = (
         len(roles) >= 3
@@ -480,7 +516,7 @@ def audit_chapter_set(packet: dict) -> list[dict]:
     return errors
 
 
-def audit_packet(packet: dict) -> AuditReport:
+def audit_packet(packet: dict, strict_counterforce: bool = False) -> AuditReport:
     """Run deterministic checks that do not require literary interpretation."""
     errors: list[dict] = []
     warnings: list[dict] = []
@@ -584,6 +620,24 @@ def audit_packet(packet: dict) -> AuditReport:
 
     packet_precision = packet.get("precision") if isinstance(packet.get("precision"), dict) else {}
     strict_full_book = _is_final_full_book(packet) and packet_precision.get("full_book_detailed_required") is True
+
+    death_milestones: dict[str, int] = {}
+    for e_id, ent in entity_map.items():
+        if str(ent.get("kind", "")).upper() in {"CHARACTER", "CHAR"}:
+            p = ent.get("payload") if isinstance(ent.get("payload"), dict) else {}
+            if p.get("death_chapter") is not None:
+                try:
+                    death_milestones[e_id] = int(p["death_chapter"])
+                except (ValueError, TypeError):
+                    pass
+        elif str(ent.get("kind", "")).upper() == "CHAPTER_PLAN":
+            p = ent.get("payload") if isinstance(ent.get("payload"), dict) else {}
+            c_no = p.get("chapter_no")
+            if isinstance(c_no, int):
+                for d in p.get("deaths_in_this_chapter", []):
+                    if d in entity_map and d not in death_milestones:
+                        death_milestones[d] = c_no
+
     for entity_id, entity in entity_map.items():
         kind = str(entity.get("kind", "UNKNOWN")).upper()
         payload = entity.get("payload") if isinstance(entity.get("payload"), dict) else {}
@@ -652,6 +706,8 @@ def audit_packet(packet: dict) -> AuditReport:
             line_status = str(payload.get("status", entity.get("status", "ACTIVE"))).upper()
             if line_status in {"CLOSED", "RESOLVED", "PAID_OFF"} and not payload.get("closure_event"):
                 errors.append(_issue("CLOSED_LINE_WITHOUT_EVENT", "closed line needs a closure_event", entity_id))
+            if _is_final_full_book(packet) and line_status not in {"CLOSED", "RESOLVED", "PAID_OFF"}:
+                errors.append(_issue("UNRESOLVED_FINALE_LINE", "narrative line must be resolved or closed in final full book", entity_id))
         if kind == "PROMISE":
             required = ("creation_event", "maturity_condition", "reveal_window", "payoff_event")
             if any(not payload.get(field) for field in required):
@@ -663,14 +719,40 @@ def audit_packet(packet: dict) -> AuditReport:
             promise_status = str(payload.get("status", entity.get("status", "ACTIVE"))).upper()
             if promise_status in {"PAID_OFF", "RESOLVED"} and not payload.get("payoff_event"):
                 errors.append(_issue("PAID_PROMISE_WITHOUT_PAYOFF", "paid-off promise needs a payoff_event", entity_id))
+            if _is_final_full_book(packet) and promise_status not in {"PAID_OFF", "RESOLVED", "CLOSED"}:
+                errors.append(_issue("UNRESOLVED_FINALE_PROMISE", "promise must be paid off or resolved in final full book", entity_id))
             for field in ("who_knows", "who_misunderstands", "reinforcement_events", "choices_affected"):
                 refs = payload.get(field, [])
                 if isinstance(refs, list):
                     for ref in refs:
                         if ref not in entity_map:
-                            errors.append(_issue("BROKEN_REFERENCE", f"promise {field} references an unknown entity", entity_id))
+                            errors.append(_issue("BROKEN_REFERENCE", f"promise {ref} references an unknown entity", entity_id))
 
         if kind == "CHAPTER_PLAN":
+            c_no = payload.get("chapter_no")
+            if isinstance(c_no, int):
+                active_actors = payload.get("active_actors") or []
+                if isinstance(active_actors, list):
+                    for a in active_actors:
+                        if a in death_milestones and c_no > death_milestones[a]:
+                            errors.append(_issue("DEAD_ACTOR_RESURRECTION", f"dead character {a} cannot act in chapter {c_no}", entity_id))
+                for b in payload.get("dynamic_beats", []) if isinstance(payload.get("dynamic_beats"), list) else []:
+                    if isinstance(b, dict):
+                        b_act = b.get("active_actor")
+                        if b_act in death_milestones and c_no > death_milestones[b_act]:
+                            errors.append(_issue("DEAD_ACTOR_RESURRECTION", f"dead character {b_act} cannot act in beat {b.get('beat_id')}", entity_id))
+            cc = payload.get("conflict_contract") if isinstance(payload.get("conflict_contract"), dict) else {}
+            actor_a = payload.get("actor_a") or cc.get("actor_a")
+            actor_b = payload.get("actor_b") or cc.get("actor_b")
+            if actor_a and actor_b and actor_a == actor_b:
+                errors.append(_issue("SELF_CONFLICT_INVALID", f"actor_a and actor_b cannot be identical: {actor_a}", entity_id))
+
+            ch_mode = payload.get("chapter_mode")
+            if ch_mode and "FINGERPRINT_SPECS" in globals() and ch_mode in FINGERPRINT_SPECS and ch_mode != "STANDARD_LONG":
+                fp_errs = validate_chapter_fingerprint(payload)
+                for fe in fp_errs:
+                    errors.append(_issue("DYNAMIC_FINGERPRINT_VIOLATION", fe, entity_id))
+
             level = str(payload.get("plan_level", "STORY_NODE")).upper()
             if level not in {"STORY_NODE", "DETAILED_PLAN", "PRODUCTION_READY"}:
                 errors.append(_issue("INVALID_PLAN_LEVEL", "plan_level must be STORY_NODE, DETAILED_PLAN, or PRODUCTION_READY", entity_id))
@@ -761,6 +843,23 @@ def audit_packet(packet: dict) -> AuditReport:
                 if nxt not in seen:
                     seen.add(nxt)
                     queue.append(nxt)
+
+    if "NarrativePhysicsValidator" in globals():
+        is_strict_cf = (
+            strict_counterforce
+            or bool(packet.get("strict_mode"))
+            or bool(packet.get("precision", {}).get("strict_counterforce"))
+        )
+        physics_audit = NarrativePhysicsValidator.audit_packet(
+            packet,
+            strict_teleportation=True,
+            strict_item_custody=True,
+            strict_counterforce=is_strict_cf,
+        )
+        for err in physics_audit.get("errors", []):
+            errors.append(_issue(err.get("code", "NARRATIVE_PHYSICS_ERROR"), err.get("message", ""), err.get("object_id")))
+        for warn in physics_audit.get("warnings", []):
+            warnings.append(_issue(warn.get("code", "NARRATIVE_PHYSICS_WARN"), warn.get("message", ""), warn.get("object_id")))
 
     return AuditReport(errors, warnings, {
         "entities": len(entity_map), "edges": len(edge_map),
@@ -961,6 +1060,56 @@ CREATE TABLE IF NOT EXISTS packet_metadata(
   provenance_registry_json TEXT NOT NULL DEFAULT '{}',
   FOREIGN KEY(project_id) REFERENCES projects(project_id)
 );
+CREATE TABLE IF NOT EXISTS chapter_spacetime(
+  project_id TEXT NOT NULL,
+  chapter_no INTEGER NOT NULL,
+  story_day REAL NOT NULL,
+  duration_hours REAL NOT NULL,
+  location_id TEXT NOT NULL,
+  realm_id TEXT,
+  PRIMARY KEY (project_id, chapter_no),
+  FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE TABLE IF NOT EXISTS epistemic_states(
+  project_id TEXT NOT NULL,
+  chapter_no INTEGER NOT NULL,
+  actor_id TEXT NOT NULL,
+  known_facts_json TEXT NOT NULL DEFAULT '[]',
+  false_beliefs_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (project_id, chapter_no, actor_id),
+  FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE TABLE IF NOT EXISTS item_chain_of_custody(
+  project_id TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  chapter_no INTEGER NOT NULL,
+  current_holder TEXT NOT NULL,
+  location_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  PRIMARY KEY (project_id, item_id, chapter_no),
+  FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE TABLE IF NOT EXISTS character_relationships(
+  project_id TEXT NOT NULL,
+  source_char_id TEXT NOT NULL,
+  target_char_id TEXT NOT NULL,
+  relationship_type TEXT NOT NULL DEFAULT 'ALLY',
+  affinity_score REAL NOT NULL DEFAULT 50.0,
+  ideology_friction REAL NOT NULL DEFAULT 0.0,
+  unpaid_debt_text TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, source_char_id, target_char_id),
+  FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE TABLE IF NOT EXISTS character_arcs(
+  project_id TEXT NOT NULL,
+  character_id TEXT NOT NULL,
+  volume_no INTEGER NOT NULL,
+  arc_stage TEXT NOT NULL DEFAULT 'INITIAL',
+  trauma_ledger_json TEXT NOT NULL DEFAULT '[]',
+  transformation_summary TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, character_id, volume_no),
+  FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
 """
 
 
@@ -975,6 +1124,15 @@ class CanonicalStore:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.executescript(SCHEMA)
+        project_columns = {row[1] for row in connection.execute("PRAGMA table_info(projects)")}
+        if "genre" not in project_columns:
+            connection.execute("ALTER TABLE projects ADD COLUMN genre TEXT NOT NULL DEFAULT 'XIANXIA'")
+        if "tone" not in project_columns:
+            connection.execute("ALTER TABLE projects ADD COLUMN tone TEXT NOT NULL DEFAULT 'SHUANGWEN'")
+        if "target_chapters" not in project_columns:
+            connection.execute("ALTER TABLE projects ADD COLUMN target_chapters INTEGER NOT NULL DEFAULT 144")
+        if "world_engine_config_json" not in project_columns:
+            connection.execute("ALTER TABLE projects ADD COLUMN world_engine_config_json TEXT NOT NULL DEFAULT '{}'")
         commit_columns = {row[1] for row in connection.execute("PRAGMA table_info(commits)")}
         if "snapshot_json" not in commit_columns:
             connection.execute("ALTER TABLE commits ADD COLUMN snapshot_json TEXT")
@@ -1328,6 +1486,120 @@ class CanonicalStore:
                 ),
             )
 
+            connection.execute("DELETE FROM chapter_spacetime WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM epistemic_states WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM item_chain_of_custody WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM character_relationships WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM character_arcs WHERE project_id = ?", (project_id,))
+
+            st_rows = []
+            ep_rows = []
+            cust_rows = []
+            rel_rows = []
+            arc_rows = []
+            for ent in effective_packet.get("entities", []):
+                kind = str(ent.get("kind", "")).upper()
+                p = ent.get("payload") if isinstance(ent.get("payload"), dict) else {}
+                c_no = p.get("chapter_no")
+                cid = str(ent.get("id", ""))
+                if kind in {"CHARACTER", "CHAR"}:
+                    for rel in p.get("relationships", []):
+                        if isinstance(rel, dict) and "target" in rel:
+                            rel_rows.append((
+                                project_id, cid, str(rel["target"]),
+                                str(rel.get("type", "ALLY")),
+                                float(rel.get("affinity", 50.0)),
+                                float(rel.get("ideology_friction", 0.0)),
+                                str(rel.get("unpaid_debt", "")),
+                            ))
+                    for arc in p.get("arc_stages", []):
+                        if isinstance(arc, dict):
+                            arc_rows.append((
+                                project_id, cid,
+                                int(arc.get("volume_no", 1)),
+                                str(arc.get("stage", "INITIAL")),
+                                _canonical_json(arc.get("trauma_ledger", [])),
+                                str(arc.get("transformation", "")),
+                            ))
+                elif kind == "CHAPTER_PLAN" and isinstance(c_no, int):
+                    st = p.get("spacetime")
+                    if isinstance(st, dict):
+                        st_rows.append((
+                            project_id, c_no,
+                            float(st.get("story_day", c_no)),
+                            float(st.get("duration_hours", 4.0)),
+                            str(st.get("location_id") or p.get("location") or "LOC.unknown"),
+                            str(st.get("realm_id") or "MAIN_REALM"),
+                        ))
+                    ep = p.get("epistemic_states")
+                    if isinstance(ep, list):
+                        for item in ep:
+                            if isinstance(item, dict) and "actor_id" in item:
+                                ep_rows.append((
+                                    project_id, c_no, str(item["actor_id"]),
+                                    _canonical_json(item.get("known_facts", [])),
+                                    _canonical_json(item.get("false_beliefs", [])),
+                                ))
+                    cust = p.get("item_events")
+                    if isinstance(cust, list):
+                        for item in cust:
+                            if isinstance(item, dict) and "item_id" in item:
+                                cust_rows.append((
+                                    project_id, str(item["item_id"]), c_no,
+                                    str(item.get("new_holder") or item.get("current_holder") or "CHAR.unknown"),
+                                    str(item.get("location_id") or "LOC.unknown"),
+                                    str(item.get("status", "ACTIVE")),
+                                ))
+
+            for edge in effective_packet.get("edges", []):
+                if not isinstance(edge, dict):
+                    continue
+                etype = str(edge.get("type", "")).upper()
+                if etype in {"RELATION", "RELATIONSHIP", "AFFINITY", "CONFLICT"}:
+                    src = str(edge.get("source", ""))
+                    tgt = str(edge.get("target", ""))
+                    epayload = edge.get("payload") if isinstance(edge.get("payload"), dict) else {}
+                    if src and tgt:
+                        rel_rows.append((
+                            project_id, src, tgt,
+                            str(epayload.get("type") or etype),
+                            float(epayload.get("affinity", 50.0)),
+                            float(epayload.get("ideology_friction", 0.0)),
+                            str(epayload.get("unpaid_debt", "")),
+                        ))
+
+            if st_rows:
+                connection.executemany(
+                    "INSERT INTO chapter_spacetime(project_id, chapter_no, story_day, duration_hours, location_id, realm_id) VALUES(?,?,?,?,?,?)",
+                    st_rows,
+                )
+            if ep_rows:
+                connection.executemany(
+                    "INSERT INTO epistemic_states(project_id, chapter_no, actor_id, known_facts_json, false_beliefs_json) VALUES(?,?,?,?,?)",
+                    ep_rows,
+                )
+            if cust_rows:
+                connection.executemany(
+                    "INSERT INTO item_chain_of_custody(project_id, item_id, chapter_no, current_holder, location_id, status) VALUES(?,?,?,?,?,?)",
+                    cust_rows,
+                )
+            if rel_rows:
+                connection.executemany(
+                    """INSERT OR REPLACE INTO character_relationships(
+                        project_id, source_char_id, target_char_id, relationship_type,
+                        affinity_score, ideology_friction, unpaid_debt_text
+                    ) VALUES(?,?,?,?,?,?,?)""",
+                    rel_rows,
+                )
+            if arc_rows:
+                connection.executemany(
+                    """INSERT OR REPLACE INTO character_arcs(
+                        project_id, character_id, volume_no, arc_stage,
+                        trauma_ledger_json, transformation_summary
+                    ) VALUES(?,?,?,?,?,?)""",
+                    arc_rows,
+                )
+
             now = _now()
             connection.execute(
                 "INSERT INTO commits(project_id,version,parent_version,message,snapshot_hash,snapshot_json,created_at) VALUES(?,?,?,?,?,?,?)",
@@ -1338,9 +1610,12 @@ class CanonicalStore:
                 VALUES(?,?,?,?,?,?,?)""",
                 [(project_id, next_version, *change) for change in changes],
             )
+            genre = str(packet.get("genre") or "XIANXIA").upper()
+            tone = str(packet.get("tone") or "SHUANGWEN").upper()
+            target_chapters = int(packet.get("target_chapters") or 144)
             connection.execute(
-                "UPDATE projects SET version = ?, updated_at = ? WHERE project_id = ?",
-                (next_version, now, project_id),
+                "UPDATE projects SET version = ?, updated_at = ?, genre = ?, tone = ?, target_chapters = ? WHERE project_id = ?",
+                (next_version, now, genre, tone, target_chapters, project_id),
             )
         return CommitResult(project_id, next_version, snapshot_hash, len(changes))
 
@@ -1778,7 +2053,7 @@ class GraphProjector:
         "UNWIND $edges AS row "
         "OPTIONAL MATCH (s:Entity {id: row.source, project_id: $project_id}), "
         "(t:Entity {id: row.target, project_id: $project_id}) "
-        "WITH row, s, t WHERE s IS NULL OR t IS NULL "
+        "WITH row, s, t WHERE ((s IS NULL AND NOT row.source IN $created_ids) OR (t IS NULL AND NOT row.target IN $created_ids)) "
         "RETURN row.id AS edge_id, row.source AS source_id, row.target AS target_id"
     )
 
@@ -1911,14 +2186,26 @@ class GraphProjector:
                 })
             versions.append(int(change.get("version", 0)))
         cypher = (self.graph_dir / "projection.cypher").read_text(encoding="utf-8")
-        self.ensure_schema()
+        batch_entity_ids = {item["id"] for item in entities}
         preflight = self._run(self.EDGE_PREFLIGHT, {
             "project_id": project_id,
             "edges": edges,
+            "created_ids": list(batch_entity_ids),
         })
         rows = list(csv.reader(io.StringIO(preflight), delimiter="\t"))
+        real_missing = []
         if len(rows) > 1:
-            edge_id = rows[1][0] if rows[1] else "unknown"
+            for row in rows[1:]:
+                if not row:
+                    continue
+                edge_id = row[0]
+                src = row[1] if len(row) > 1 else ""
+                tgt = row[2] if len(row) > 2 else ""
+                if src in batch_entity_ids and tgt in batch_entity_ids:
+                    continue
+                real_missing.append((edge_id, src, tgt))
+        if real_missing:
+            edge_id = real_missing[0][0]
             raise ValidationError(
                 f"Neo4j edge endpoint is missing for {edge_id}", "NEO4J_ENDPOINT_MISSING", edge_id
             )

@@ -23,12 +23,16 @@ DEAD_TIMELINE = {
     "CHAR.zhao_wuji": 13,
     "CHAR.wu_titian": 36,
     "CHAR.qian_wanjin": 42,
-    "CHAR.wanyan_badu": 60,
-    "CHAR.yan_songqing": 80,
-    "CHAR.zhao_tianlong": 84,
-    "CHAR.jiuyou_laozu": 92,
-    "CHAR.xiao_qianyuan": 101,
-    "CHAR.wuchenzi": 112,
+    "CHAR.zhao_wenzhao": 42,
+    "CHAR.wan_yan_badu": 56,
+    "CHAR.tianhuo_zhenren": 62,
+    "CHAR.zhao_tianlong": 81,
+    "CHAR.yan_songqing": 92,
+    "CHAR.xiao_qianyuan": 106,
+    "CHAR.xuanyin_laozu": 111,
+    "CHAR.taixuzi": 114,
+    "CHAR.wuchenzi": 120,
+    "CHAR.lu_song": 106,
 }
 
 FORBIDDEN_ALLIE_PATTERNS = [
@@ -98,7 +102,7 @@ def validate_packet_thoroughly(packet_path: Path):
         # Extract 10-char substrings
         for i in range(len(text) - 9):
             sub = text[i:i+10]
-            if not any(name in sub for name in ALLIE_NAMES + ["赵无极", "钱万金", "严嵩卿", "赵天龙", "萧乾元", "无尘子"]):
+            if not any(name in sub for name in ALLIE_NAMES + ["赵无极", "钱万金", "严嵩卿", "赵天龙", "萧乾元", "无尘子", "完颜拔都", "太虚子", "玄阴老祖", "天火真人", "乌啼天"]):
                 all_phrases.append(sub)
                 
     counts = Counter(all_phrases)
@@ -142,7 +146,7 @@ def validate_packet_thoroughly(packet_path: Path):
     return errors, warnings
 
 if __name__ == "__main__":
-    p_path = Path("/Users/tang/PycharmProjects/pythonProject/changpianxiaoshuodagang/.outline/tianque_packet.json")
+    p_path = Path(__file__).parent / "tianque_packet.json"
     if p_path.exists():
         errs, warns = validate_packet_thoroughly(p_path)
         print(f"Independent Audit Complete: {len(errs)} errors, {len(warns)} warnings")

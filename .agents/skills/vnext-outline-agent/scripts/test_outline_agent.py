@@ -1107,6 +1107,92 @@ class AdversarialRobustnessTests(unittest.TestCase):
         capacity = outline_agent.audit_chapter_capacity(chapter)
         self.assertEqual(capacity["final_capacity"], "FULL")
         self.assertEqual(capacity["mid_chapter_load"], "PASS")
+    def test_unresolved_line_or_promise_fails_in_final_full_book(self):
+        packet = build_demo_packet()
+        packet["precision"] = {
+            "production_stage": "FINAL_FULL_BOOK",
+            "full_book_detailed_required": False,
+        }
+        packet["entities"].append({
+            "id": "LINE.1", "kind": "LINE", "namespace": "PLAN",
+            "payload": {"owner": "CHAR.a", "closure_condition": "cond", "status": "ACTIVE", "provenance_refs": ["USER.1"]},
+        })
+        packet["entities"].append({
+            "id": "PROMISE.1", "kind": "PROMISE", "namespace": "PLAN",
+            "payload": {
+                "creation_event": "EVENT.1", "maturity_condition": "mat", "reveal_window": "win",
+                "payoff_event": "EVENT.2", "status": "ACTIVE", "provenance_refs": ["USER.1"],
+            },
+        })
+        report = audit_packet(packet)
+        errors = {e["code"] for e in report.errors}
+        self.assertIn("UNRESOLVED_FINALE_LINE", errors)
+        self.assertIn("UNRESOLVED_FINALE_PROMISE", errors)
+
+    def test_dead_actor_resurrection_fails_audit(self):
+        packet = build_demo_packet()
+        for e in packet["entities"]:
+            if e["id"] == "CHAR.a":
+                e["payload"]["death_chapter"] = 1
+        ch_payload = build_chapter_payload(["ACTION", "COUNTERMOVE", "REPLAN", "HOOK"])
+        ch_payload["chapter_no"] = 2
+        ch_payload["active_actors"] = ["CHAR.a", "CHAR.b"]
+        packet["entities"].append({
+            "id": "CHAPTER_PLAN.2", "kind": "CHAPTER_PLAN", "namespace": "PLAN", "payload": ch_payload,
+        })
+        report = audit_packet(packet)
+        errors = {e["code"] for e in report.errors}
+        self.assertIn("DEAD_ACTOR_RESURRECTION", errors)
+
+    def test_dynamic_fingerprint_chapter_capacity(self):
+        payload = build_chapter_payload(["ACTION", "COUNTERMOVE", "REPLAN", "HOOK"])
+        payload["target_prose_contract"]["chapter_mode"] = "ASSAULT"
+        payload["dynamic_beats"][1]["active_actor"] = "CHAR.b"
+        chapter = {
+            "id": "CHAPTER_PLAN.1",
+            "kind": "CHAPTER_PLAN",
+            "namespace": "PLAN",
+            "payload": payload,
+        }
+        capacity = outline_agent.audit_chapter_capacity(chapter, strict=True)
+        self.assertEqual(capacity["final_capacity"], "FULL")
+
+    def test_projector_preflight_allows_edges_between_new_batch_entities(self):
+        class BatchEndpointProjector(GraphProjector):
+            def __init__(self):
+                super().__init__(shell="fake")
+
+            def ensure_schema(self):
+                return None
+
+            def _run(self, cypher, params=None):
+                if cypher == self.EDGE_PREFLIGHT:
+                    return "edge_id\tsource_id\ttarget_id\n"
+                return ""
+
+        projector = BatchEndpointProjector()
+        result = projector.sync("PROJECT.demo", [
+            {
+                "change_id": 1, "version": 1, "object_type": "ENTITY", "object_id": "CHAR.new",
+                "action": "UPSERT", "before_json": None,
+                "after_json": json.dumps({"entity_id": "CHAR.new", "kind": "CHARACTER", "name": "New", "namespace": "CANON", "status": "ACTIVE", "payload_json": "{}"}),
+            },
+            {
+                "change_id": 2, "version": 1, "object_type": "ENTITY", "object_id": "EVENT.new",
+                "action": "UPSERT", "before_json": None,
+                "after_json": json.dumps({"entity_id": "EVENT.new", "kind": "EVENT", "name": "New Event", "namespace": "CANON", "status": "ACTIVE", "payload_json": "{}"}),
+            },
+            {
+                "change_id": 3, "version": 1, "object_type": "EDGE", "object_id": "EDGE.new",
+                "action": "UPSERT", "before_json": None,
+                "after_json": json.dumps({
+                    "edge_id": "EDGE.new", "edge_type": "CAUSES", "source_id": "CHAR.new",
+                    "target_id": "EVENT.new", "namespace": "PLAN", "status": "ACTIVE",
+                    "payload_json": "{}",
+                }),
+            },
+        ])
+        self.assertEqual(result.applied, 3)
 
 
 if __name__ == "__main__":

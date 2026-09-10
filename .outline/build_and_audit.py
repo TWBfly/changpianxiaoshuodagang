@@ -11,7 +11,7 @@ OUTLINE_DIR = Path(__file__).parent
 sys.path.insert(0, str(OUTLINE_DIR))
 sys.path.insert(0, str(OUTLINE_DIR.parent / ".agents" / "skills" / "vnext-outline-agent" / "scripts"))
 
-from outline_agent import audit_packet, render_packet_markdown
+from outline_agent import audit_packet, render_packet_markdown, CanonicalStore
 from v2_chapter_specs import generate_all_144_specs
 
 SOURCE = ["BRIEF.user_source", "DESIGN.originalized_adaptation", "RUNTIME.vnext16_2"]
@@ -586,7 +586,7 @@ def make_full_packet():
             "independent_goal": "确立'法律面前人人平等、天子与仙人犯法与庶民同罪'之独立司法体系",
             "obstacle": "极道武力私刑冲动、封建特权庇护、法官受贿与刑讯逼供伪证",
             "failure_state": "司法沦为掌权者报复政敌的私刑工具，冤狱丛生法统崩坏",
-            "climax_trigger": "第80章菜市口公审严党核心、第127章科举舞弊案依律盲审重考",
+            "climax_trigger": "第80章菜市口公审严党核心、第127章科举舞弊案依律弥封重考",
             "collision_points": ["第39章拒绝少帅私刑要求证据闭环", "第77章拒绝冷月刑讯逼供口供"],
             "closure_condition": "悬剑司司法独立审判，华山立宪将至尊武力置于根本宪法之下",
             "closure_event": "EVENT.tianyuan_guiyin",
@@ -705,9 +705,9 @@ def make_full_packet():
                 "cause_from_previous": b["cause"],
                 "active_actor": beat_actor,
                 "actor_goal_before": b["before_goal"],
-                "action": f"第{number}章第{b_idx}节拍行动：{b['action']}",
+                "action": b["action"],
                 "counterforce": b["counterforce"],
-                "new_information_or_choice": f"第{number}章第{b_idx}步情报差：{b['info_or_choice']}",
+                "new_information_or_choice": b["info_or_choice"],
                 "delta": beat_delta,
                 "actor_goal_after": b["after_goal"],
                 "next_pressure_created": b["pressure"],
@@ -820,6 +820,7 @@ def make_full_packet():
         })
 
     packet = {
+        "packet_mode": "SNAPSHOT",
         "format": "vnext16.2",
         "precision": {
             "source_similarity_policy": "MECHANISM_ONLY",
@@ -834,6 +835,17 @@ def make_full_packet():
             "retainable_mechanisms": ["五维立体降维打击", "六卷介质升维Problem Morph", "七位师姐专业分工与独立人格", "救世主华山立宪自我解构"],
             "strictly_forbidden_inheritances": ["严禁复用原作专属专有名词与独特道具", "严禁复用原作专属桥段情节顺序", "严禁复用原作专属台词与场景原案", "严禁破坏死者除名与状态机连续性"],
         },
+        "assumptions": project["payload"]["assumptions"],
+        "open_questions": project["payload"]["open_questions"],
+        "source_refs": SOURCE,
+        "negative_facts": [
+            "禁止生成假大空的口号式节拍，每个节拍必须包含具象动作、代价与信息差变化。",
+            "禁止已死实体复活，死亡时序严格遵循 Death Ledger。",
+            "禁止角色决策模型同质化，必须体现师姐弟之间的方案摩擦与方法冲突。",
+            "禁止反派强行降智送人头，必须有至少一次战术性给主角制造真实损失。",
+            "禁止任何未在前期埋设的神兵天降或机械降神。",
+            "禁止在终章使用三万京观等与公道价值观割裂的嗜杀设定。",
+        ],
         "negative_prompts": [
             "禁止生成假大空的口号式节拍，每个节拍必须包含具象动作、代价与信息差变化。",
             "禁止已死实体复活，死亡时序严格遵循 Death Ledger。",
@@ -873,12 +885,33 @@ def main():
         if len(report.errors) > 15:
             print(f"  ... and {len(report.errors) - 15} more errors")
         sys.exit(1)
-    
+
     print("ALL 144 CHAPTERS AUDIT CHECKS PASSED PERFECTLY!")
-    md_content = render_packet_markdown(packet, title=packet["entities"][0]["name"], project_id=packet["entities"][0]["id"])
+
+    # 1. Save canonical packet JSON
+    out_json = OUTLINE_DIR / "tianque_packet.json"
+    out_json.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Exported packet JSON to {out_json}")
+
+    # 2. Sync to SQLite novel.db via CanonicalStore
+    db_path = OUTLINE_DIR / "novel.db"
+    store = CanonicalStore(db_path)
+    proj_id = packet["entities"][0]["id"]
+    proj_title = packet["entities"][0]["name"]
+    ver = store.init_project(proj_id, proj_title)
+    res = store.apply_packet(proj_id, packet, expected_version=ver, message="Sync full validated master outline packet")
+    print(f"Canonical store synced project {proj_id} version {res.version}, changes: {res.outbox_count}")
+    changes = store.pending_changes(proj_id)
+    if changes:
+        store.mark_projection([int(c["change_id"]) for c in changes], "APPLIED")
+
+    # 3. Export Markdown and Audit Report
     out_md = OUTLINE_DIR.parent / "仿写大纲.md"
-    out_md.write_text(md_content, encoding="utf-8")
-    print(f"Exported to {out_md}, file size: {len(md_content.encode('utf-8'))} bytes, total lines: {len(md_content.splitlines())}")
+    store.export_markdown(proj_id, out_md)
+    out_audit = OUTLINE_DIR.parent / "audit-report.md"
+    store.export_audit(proj_id, out_audit)
+    print(f"Exported outline markdown to {out_md}")
+    print(f"Exported audit report to {out_audit}")
 
 if __name__ == "__main__":
     main()
